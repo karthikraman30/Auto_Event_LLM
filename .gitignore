@@ -49,3 +49,10 @@ Thumbs.db
 # Environment variables (contains secrets!)
 .env
 *.env
+
+.early.coverage
+
+# Data output
+*.xlsx
+*.json
+*.csv

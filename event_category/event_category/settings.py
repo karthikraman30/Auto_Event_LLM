@@ -18,7 +18,17 @@ NEWSPIDER_MODULE = "event_category.spiders"
 ADDONS = {}
 
 import os
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")  # Set in .env file or environment
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load .env file from project root (ML_automation_events/.env)
+# settings.py is at: event_category/event_category/settings.py
+# .env is at: .env (3 levels up)
+env_path = Path(__file__).resolve().parent.parent.parent / '.env'
+load_dotenv(env_path)
+
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # Crawl responsibly by identifying yourself (and your website) on the user-agent
 #USER_AGENT = "event_category (+http://www.yourdomain.com)"
