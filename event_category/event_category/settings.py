@@ -27,6 +27,7 @@ from dotenv import load_dotenv
 env_path = Path(__file__).resolve().parent.parent.parent / '.env'
 load_dotenv(env_path)
 
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 

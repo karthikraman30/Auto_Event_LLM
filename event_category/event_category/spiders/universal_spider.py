@@ -3,241 +3,285 @@ import html2text
 import json
 import os
 import re
-from datetime import datetime
-from groq import Groq
+from datetime import datetime, timedelta
+import google.generativeai as genai
 from scrapy_playwright.page import PageMethod
 from event_category.items import EventCategoryItem
 
-# --- 1. CONFIGURATION: Target Group Mapping ---
-# This maps keywords (English & Swedish) to your standard Excel categories.
-TARGET_GROUP_MAPPING = {
-    # Children (0-12)
-    'barn': 'children', 'småbarn': 'children', 'förskolebarn': 'children',
-    'children': 'children', 'kids': 'children', 'bebis': 'children',
-    # Teens (13-19)
-    'ungdom': 'teens', 'tonåring': 'teens', 'unga': 'teens',
-    'teens': 'teens', 'teenagers': 'teens',
-    # Adults (20+)
-    'vuxen': 'adults', 'vuxna': 'adults', 'senior': 'adults',
-    'adults': 'adults',
-    # Families
-    'familj': 'families', 'family': 'families',
-    # All ages
-    'alla': 'all_ages', 'all ages': 'all_ages', 'everyone': 'all_ages',
-    'all_ages': 'all_ages'
-}
-
-def normalize_target_group(target_group_str):
-    """Normalize target group string to standard categories (e.g., 'Barn' -> 'children')."""
-    if not target_group_str:
-        return "all_ages"  # Default if unspecified
-    
-    target_lower = target_group_str.lower().strip()
-    found_categories = set()
-    
-    # Check for keyword matches
-    for term, category in TARGET_GROUP_MAPPING.items():
-        if term in target_lower:
-            found_categories.add(category)
-            
-    # Heuristic for age ranges (e.g. "5-10 år" or "5-10 years")
-    age_match = re.search(r'(\d+)\s*[-–]\s*(\d+)', target_lower)
-    if age_match:
-        min_age, max_age = int(age_match.group(1)), int(age_match.group(2))
-        if max_age <= 12: found_categories.add('children')
-        elif min_age >= 13 and max_age <= 19: found_categories.add('teens')
-        elif min_age >= 18: found_categories.add('adults')
-
-    if not found_categories:
-        return target_group_str # Return original if no match found
-        
-    return ', '.join(sorted(found_categories))
-
-class UniversalSpider(scrapy.Spider):
+class MultiSiteEventSpider(scrapy.Spider):
     name = "universal_events"
+    
+    # 1. DEFINE YOUR TARGET WEBSITES HERE
+    start_urls = [
+        "https://biblioteket.stockholm.se/evenemang"
 
-    def configure_groq(self):
-        api_key = self.settings.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
+    ]
+
+    def configure_gemini(self):
+        api_key = self.settings.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
         if not api_key:
-            self.logger.error("GROQ_API_KEY is missing! Set it in .env file.")
+            self.logger.error("GEMINI_API_KEY is missing! Set it in .env file.")
             return None
-        return Groq(api_key=api_key) 
+        genai.configure(api_key=api_key)
+        return genai.GenerativeModel("gemini-2.0-flash")
 
     def start_requests(self):
-        self.client = self.configure_groq()
-        
-        # 2. DYNAMIC URL HANDLING
-        # Get the URL passed via command line: -a url="https://..."
-        target_url = getattr(self, 'url', None)
-        
-        if not target_url:
-            self.logger.error("No URL provided! Usage: scrapy crawl universal_events -a url='https://example.com'")
+        self.model = self.configure_gemini()
+        if not self.model:
             return
 
-        yield scrapy.Request(
-            target_url,
-            meta={
-                "playwright": True,
-                "playwright_include_page": True,
-                "playwright_page_methods": [
-                    PageMethod("wait_for_load_state", "networkidle"),
-                    PageMethod("wait_for_timeout", 3000), # Wait for JS rendering
-                ],
-            },
-            callback=self.parse
-        )
+        for url in self.start_urls:
+            yield scrapy.Request(
+                url,
+                meta={
+                    "playwright": True,
+                    "playwright_include_page": True,
+                    "playwright_page_methods": [
+                        PageMethod("wait_for_load_state", "networkidle"),
+                        PageMethod("wait_for_timeout", 3000), # Wait for initial JS
+                    ],
+                },
+                callback=self.parse
+            )
 
     async def parse(self, response):
         page = response.meta.get("playwright_page")
-        if page:
-            self.logger.info(f"Scraping: {response.url}")
-            
-            # === STEP A: SCROLL & CLICK (Universal Logic) ===
-            # 1. Scroll to bottom to trigger lazy loading
-            for _ in range(4): 
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await page.wait_for_timeout(1500)
+        if not page:
+            self.logger.error(f"Playwright page not found for {response.url}")
+            return
 
-            # 2. Try to click "Load More" buttons in various languages
-            load_words = ["Visa fler", "Ladda fler", "Hämta fler", "Load more", "Show more", "More events"]
-            for _ in range(3): # Max 3 clicks to prevent infinite loops
-                clicked = False
-                for word in load_words:
-                    # Look for button or link with the text
-                    btn = page.locator(f"button:has-text('{word}'), a:has-text('{word}')").first
-                    if await btn.count() > 0 and await btn.is_visible():
-                        try:
-                            self.logger.info(f"Clicking load button: '{word}'")
-                            await btn.click(force=True, timeout=5000)
-                            await page.wait_for_timeout(2000)
-                            clicked = True
-                            break
-                        except: pass
-                if not clicked: break
+        self.logger.info(f"Processing Site: {response.url}")
+        
+        # === STEP A: AGGREGATE TEXT (Scroll & Click 'Load More') ===
+        # This combines content from the whole listing into one text block
+        
+        # 1. Scroll to trigger lazy loading
+        for _ in range(4): 
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(1000)
 
-            content = await page.content()
-            await page.close()
-        else:
-            content = response.text
+        # 2. Universal 'Load More' Clicker
+        # Clicks up to 15 times to get enough events for the month
+        load_words = ["Visa fler", "Ladda fler", "Load more", "Show more", "More events", "Nästa"]
+        for _ in range(15): 
+            clicked = False
+            for word in load_words:
+                # Look for buttons/links containing these words
+                btn = page.locator(f"button:has-text('{word}'), a:has-text('{word}')").first
+                if await btn.count() > 0 and await btn.is_visible():
+                    try:
+                        self.logger.info(f"Clicking load button: '{word}'")
+                        await btn.click(force=True, timeout=5000)
+                        await page.wait_for_timeout(2000)
+                        clicked = True
+                        break # Move to next click iteration
+                    except: pass
+            if not clicked: break # No more buttons found
 
-        # === STEP B: PREPARE CONTENT ===
-        if not self.client: return
+        content = await page.content()
+        await page.close()
 
+        # === STEP B: CLEAN HTML TO TEXT ===
         h = html2text.HTML2Text()
-        h.ignore_links = True; h.ignore_images = True; h.body_width = 0
+        h.ignore_links = True
+        h.ignore_images = True
+        h.body_width = 0
+        # Reduce noise by ignoring nav/footer if possible, but raw HTML2Text is usually fine for LLMs
         text_content = h.handle(content)
 
-        # === STEP C: CALL GROQ ===
-        # Groq free tier has 12k token limit, ~25k chars
-        events = self.call_groq(text_content[:25000])
+        # === STEP C: AI ENGINE (Map Columns) ===
+        # Process content in chunks to capture all events
+        chunk_size = 20000
+        all_extracted_data = []
         
-        # === STEP D: PROCESS & FILTER (Weekly View Logic) ===
+        # Split content into chunks and process each
+        for i in range(0, min(len(text_content), 80000), chunk_size):
+            chunk = text_content[i:i + chunk_size]
+            self.logger.info(f"Processing chunk {i // chunk_size + 1} (chars {i} to {i + len(chunk)})")
+            chunk_data = self.call_ai_engine(chunk)
+            if chunk_data:
+                all_extracted_data.extend(chunk_data)
+        
+        # Remove duplicates by event_name + date_iso
+        seen = set()
+        extracted_data = []
+        for event in all_extracted_data:
+            key = (event.get('event_name', ''), event.get('date_iso', ''))
+            if key not in seen:
+                seen.add(key)
+                extracted_data.append(event)
+        
+        # === STEP D: FILTER & STORE ===
         today = datetime.now().date()
+        next_month = today + timedelta(days=30)
         
-        if events:
-            self.logger.info(f"Groq extracted {len(events)} events.")
+        if extracted_data:
+            self.logger.info(f"AI extracted {len(extracted_data)} raw events from {response.url}")
             
-            for event_data in events:
-                # 1. Weekly View Filter: Skip past events
-                date_str = event_data.get('date_iso')
-                self.logger.debug(f"Processing event: {event_data.get('event_name')} - date: {date_str}")
+            for event_data in extracted_data:
+                # 1. Map AI output to our Item Columns
+                item = EventCategoryItem()
+                item['event_name'] = event_data.get('event_name') or 'Unknown Event'
+                item['location'] = event_data.get('location') or 'N/A'
+                item['time'] = event_data.get('time') or 'N/A'
+                item['description'] = event_data.get('description') or 'N/A'
+                item['event_url'] = response.url # Link back to the main list
+                item['status'] = 'scheduled'
+                
+                # 2. Date Parsing & Filtering (Next 1 Month)
+                date_str = event_data.get('date_iso') # AI returns YYYY-MM-DD
+                
                 if date_str:
                     try:
                         event_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-                        if event_date < today:
-                            self.logger.debug(f"Skipping past event: {date_str} < {today}")
-                            continue  # SKIP past events
-                    except ValueError as e:
-                        self.logger.debug(f"Date parse error for '{date_str}': {e}") 
+                        
+                        # LOGIC: Filter for next 1 month
+                        if today <= event_date <= next_month:
+                            item['date_iso'] = date_str
+                            item['date'] = date_str
+                            item['target_group'] = event_data.get('target_group', 'All')
+                            # Normalize target group roughly for Excel
+                            item['target_group_normalized'] = self.simple_normalize(item['target_group'])
+                            
+                            yield item
+                        else:
+                            self.logger.debug(f"Skipping date {event_date}: Outside 1-month range")
+                            
+                    except ValueError:
+                        self.logger.warning(f"Date parse error: {date_str}")
+                        continue
 
-                # 2. Normalize Target Group
-                raw_target = event_data.get('target_group', '')
-                normalized_target = normalize_target_group(raw_target)
-
-                # 3. Create Item
-                item = EventCategoryItem()
-                item['event_name'] = event_data.get('event_name')
-                item['date_iso'] = date_str
-                item['date'] = date_str  # Use ISO date for display as well
-                item['time'] = event_data.get('time')
-                item['location'] = event_data.get('location')
-                item['target_group'] = raw_target
-                item['description'] = event_data.get('description')
-                item['event_url'] = response.url 
-                
-                # IMPORTANT: Set normalized target group for the Excel Column H
-                try:
-                    item['target_group_normalized'] = normalized_target
-                except KeyError:
-                    # Fallback if field missing in items.py
-                    item['extra_attributes'] = {'target_group_normalized': normalized_target}
-                
-                # Add status - use proper field, not extra_attributes
-                item['status'] = 'scheduled'
-                
-                yield item
-
-    def call_groq(self, text_content):
-        prompt = f"""Extract a list of events from the text below.
-
-Input Text:
-{text_content}
-
-Instructions:
-1. Return ONLY a raw JSON List of objects. No Markdown formatting, no code blocks.
-2. TODAY'S DATE IS: {datetime.now().strftime('%Y-%m-%d')}. Use this to determine the correct year for events.
-3. Extract only UPCOMING events. Skip any events that have already passed.
-4. Extract "Target Group" (Who is this for? e.g., "Barn 5 år", "Adults").
-
-CRITICAL - DATE HEADERS:
-5. Many event websites use DATE HEADERS followed by events that inherit that date. Examples:
-   - "23 DEC TISDAG" or "DECEMBER 23" followed by events with only times like "10:30", "11:00"
-   - "Fredag 27 december" followed by multiple events
-   - Events listed under a date header INHERIT that date, even if the event itself only shows a time.
-6. Pay close attention to section headers, date dividers, or calendar-style layouts.
-7. If you see a pattern like:
-     "23 DEC TISDAG"
-       Event A (10:30)
-       Event B (11:00)
-     "26 DEC"
-       Event C (14:00)
-   Then Event A and B have date 2025-12-23, and Event C has date 2025-12-26.
-
-IMPORTANT DATE PARSING RULES:
-8. When you see "23 DEC TISDAG", this means December 23, 2025 (2025-12-23)
-9. When you see "26 DEC", this means December 26, 2025 (2025-12-26)
-10. The format is "DAY MONTH" where DAY is the date number and MONTH is the 3-letter month abbreviation
-11. ALL events under a date header inherit that exact date
-12. Do NOT invent different dates - use the exact date shown in the header
-13. Current year is 2025, so "23 DEC" = "2025-12-23"
-
-JSON Schema:
-[
-  {{
-    "event_name": "string",
-    "date_iso": "YYYY-MM-DD",
-    "time": "HH:MM",
-    "location": "string",
-    "target_group": "string",
-    "description": "short summary"
-  }}
-]
-"""
+    def call_ai_engine(self, text_content):
+        """
+        The 'AI Engine' that maps scraped text to columns using Gemini.
+        """
+        prompt = f"""
+        You are an Event Extraction Engine.
+        Task: Extract a list of events from the text below.
+        
+        Current Date: {datetime.now().strftime('%Y-%m-%d')}
+        IMPORTANT: For dates in January and beyond, use year 2026 (since current date is December 2025).
+        
+        Input Text:
+        {text_content}
+        
+        Requirements:
+        1. Output ONLY a valid JSON list of objects. No markdown, no code fences.
+        2. Extract fields: event_name, date_iso (YYYY-MM-DD), time, location, target_group (e.g. "Kids", "Adults"), description.
+        3. KEEP DESCRIPTIONS VERY SHORT - maximum 50 characters.
+        4. TIME EXTRACTION:
+           - If the event name contains time (e.g. "Fri fredag kl 18-20"), extract "18:00-20:00" to the time field.
+           - The event_name should NOT include the time - just the event title (e.g. "Fri fredag").
+           - Use 24-hour format for times (e.g., "14:00", "18:00-20:00").
+        5. DATE LOGIC:
+           - December 2025 dates: use 2025-12-XX
+           - January onwards dates: use 2026-01-XX, 2026-02-XX, etc.
+           - Convert written dates (e.g., "25 dec", "20 jan") to YYYY-MM-DD format.
+        
+        JSON Structure:
+        [
+          {{
+            "event_name": "Fri fredag",
+            "date_iso": "2025-12-26",
+            "time": "18:00-20:00",
+            "location": "Main Hall",
+            "target_group": "Adults",
+            "description": "Free Friday event with art"
+          }}
+        ]
+        """
+        
         try:
-            response = self.client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                response_format={"type": "json_object"}
+            response = self.model.generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.1,
+                    max_output_tokens=8192,  # Prevent truncation
+                )
             )
-            result = json.loads(response.choices[0].message.content)
-            # Handle if Groq wraps it in a root object
+            
+            # Extract JSON from response, handling potential markdown code blocks
+            response_text = response.text.strip()
+            
+            # Remove markdown code fences if present
+            if response_text.startswith("```"):
+                # Remove opening fence (```json or ```)
+                response_text = re.sub(r'^```(?:json)?\n?', '', response_text)
+                # Remove closing fence
+                response_text = re.sub(r'\n?```$', '', response_text)
+            
+            # Try to parse JSON, with fallback for truncated responses
+            try:
+                result = json.loads(response_text)
+            except json.JSONDecodeError as json_err:
+                self.logger.warning(f"JSON parse error, attempting to fix: {json_err}")
+                # Try to fix truncated JSON by closing brackets
+                fixed_text = response_text.rstrip()
+                # Remove any incomplete object/string at the end
+                if fixed_text.endswith(','):
+                    fixed_text = fixed_text[:-1]
+                # Count and close open brackets
+                open_braces = fixed_text.count('{') - fixed_text.count('}')
+                open_brackets = fixed_text.count('[') - fixed_text.count(']')
+                fixed_text += '}' * max(0, open_braces)
+                fixed_text += ']' * max(0, open_brackets)
+                result = json.loads(fixed_text)
+            
+            # Handle variations in JSON structure (root object vs list)
+            if isinstance(result, list): return result
             if isinstance(result, dict):
-                for key, value in result.items():
-                    if isinstance(value, list):
-                        return value
-                return [result]
-            return result
-        except Exception as e:
-            self.logger.error(f"Groq extraction failed: {e}")
+                # Return the first list found in the dict
+                for val in result.values():
+                    if isinstance(val, list): return val
             return []
+            
+        except Exception as e:
+            self.logger.error(f"AI Engine Error: {e}")
+            return []
+
+    # Target group mapping for normalization
+    TARGET_GROUP_MAPPING = {
+        # Children (0-12)
+        'barn': 'children',
+        'bebis': 'children',
+        'småbarn': 'children',
+        'förskolebarn': 'children',
+        'kid': 'children',
+        'child': 'children',
+        # Teens (13-19)
+        'ungdom': 'teens',
+        'tonåring': 'teens',
+        'ungdomar': 'teens',
+        'teen': 'teens',
+        # Adults (20+)
+        'vuxen': 'adults',
+        'vuxna': 'adults',
+        'senior': 'adults',
+        'seniorer': 'adults',
+        'pensionär': 'adults',
+        'adult': 'adults',
+        # Families
+        'familj': 'families',
+        'familjer': 'families',
+        'family': 'families',
+        'families': 'families',
+        # All ages
+        'alla': 'all_ages',
+        'alla åldrar': 'all_ages',
+        'all': 'all_ages',
+        'general': 'all_ages',
+    }
+
+    def simple_normalize(self, target_str):
+        """Normalize target group using comprehensive mapping"""
+        if not target_str:
+            return 'all_ages'
+        
+        t = target_str.lower()
+        
+        # Check for exact or partial matches in mapping
+        for key, value in self.TARGET_GROUP_MAPPING.items():
+            if key in t:
+                return value
+        
+        return 'all_ages'
