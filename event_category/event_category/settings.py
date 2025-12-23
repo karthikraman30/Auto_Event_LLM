@@ -17,6 +17,8 @@ NEWSPIDER_MODULE = "event_category.spiders"
 
 ADDONS = {}
 
+GOOGLE_API_KEY = "AIzaSyC0Gih4cyyeqzMTidnyIAPNUDgJaiuDR9o"
+
 # Crawl responsibly by identifying yourself (and your website) on the user-agent
 #USER_AGENT = "event_category (+http://www.yourdomain.com)"
 
