@@ -17,7 +17,8 @@ NEWSPIDER_MODULE = "event_category.spiders"
 
 ADDONS = {}
 
-GOOGLE_API_KEY = "AIzaSyC0Gih4cyyeqzMTidnyIAPNUDgJaiuDR9o"
+import os
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")  # Set in .env file or environment
 
 # Crawl responsibly by identifying yourself (and your website) on the user-agent
 #USER_AGENT = "event_category (+http://www.yourdomain.com)"

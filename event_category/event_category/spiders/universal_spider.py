@@ -9,28 +9,23 @@ from event_category.items import EventCategoryItem
 
 class UniversalSpider(scrapy.Spider):
     name = "universal_events"
-    MAX_EVENTS = 50  # Limit for testing
+    MAX_EVENTS = 50 
 
     def configure_gemini(self):
-        """Setup Google Gemini API"""
-        # Get API key from settings or environment variable
         api_key = self.settings.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
         if not api_key:
-            self.logger.error("GOOGLE_API_KEY is missing! Set it in settings.py or ENV.")
+            self.logger.error("GOOGLE_API_KEY is missing!")
             return None
         
         genai.configure(api_key=api_key)
-        # Using the specific model you requested
-        return genai.GenerativeModel('gemini-2.5-flash') 
+        # Use gemini-2.0-flash (or gemini-1.5-flash-latest for older API)
+        return genai.GenerativeModel('gemini-2.0-flash') 
 
     def start_requests(self):
-        # 1. Initialize Gemini
         self.model = self.configure_gemini()
-        
-        # 2. Get URL from command line argument
         url = getattr(self, 'url', None)
         if not url:
-            self.logger.error("No URL provided! Usage: scrapy crawl universal_events -a url='https://...'" )
+            self.logger.error("No URL provided!")
             return
 
         yield scrapy.Request(
@@ -39,8 +34,8 @@ class UniversalSpider(scrapy.Spider):
                 "playwright": True,
                 "playwright_include_page": True,
                 "playwright_page_methods": [
-                    PageMethod("wait_for_load_state", "networkidle"),  # Wait for network to be idle
-                    PageMethod("wait_for_timeout", 5000),  # Additional wait for JS rendering
+                    PageMethod("wait_for_load_state", "networkidle"),
+                    PageMethod("wait_for_timeout", 5000),
                 ],
             },
             callback=self.parse
@@ -49,37 +44,50 @@ class UniversalSpider(scrapy.Spider):
     async def parse(self, response):
         page = response.meta.get("playwright_page")
         if page:
-            # Click "Visa fler evenemang" button to load more events
+            # === STRATEGY: Hybrid Scroll & Click ===
+            # Many modern sites (Tekniska, Moderna) load on scroll. 
+            # We scroll to bottom, then check for buttons.
+            
+            for _ in range(3):  # Scroll down 3 times
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(2000)
+
+            # Try to click "Load More" buttons in multiple languages
+            load_more_candidates = [
+                "Visa fler", "Ladda fler", "Hämta fler", # Swedish
+                "Load more", "Show more", "More events", "See more" # English
+            ]
+            
             load_more_clicks = 0
-            # Calculate clicks needed: initial ~20 events + ~20 per click
-            # For 50 events: need 2 clicks (20 + 20 + 20 = 60, then limit to 50)
-            max_clicks = max(1, (self.MAX_EVENTS - 20) // 20 + 1)
+            max_clicks = 3  # Keep it low to avoid infinite loops during testing
             
             while load_more_clicks < max_clicks:
-                try:
-                    # Look for the "load more" button
-                    load_more_btn = page.locator('button:has-text("Visa fler")')
-                    if await load_more_btn.count() > 0 and await load_more_btn.first.is_visible():
-                        await load_more_btn.first.click()
-                        load_more_clicks += 1
-                        self.logger.info(f"Clicked 'Load more' button ({load_more_clicks}/{max_clicks})")
-                        await page.wait_for_timeout(2000)  # Wait for content to load
-                    else:
-                        self.logger.info("No more 'Load more' button found")
-                        break
-                except Exception as e:
-                    self.logger.info(f"Stopped loading more: {e}")
+                clicked = False
+                for label in load_more_candidates:
+                    # Case insensitive search for button text
+                    btn = page.locator(f"button:has-text('{label}'), a:has-text('{label}')")
+                    if await btn.count() > 0 and await btn.first.is_visible():
+                        try:
+                            self.logger.info(f"Clicking '{label}' button...")
+                            await btn.first.click(timeout=5000)
+                            await page.wait_for_timeout(3000)
+                            clicked = True
+                            load_more_clicks += 1
+                            break # Break inner loop to re-evaluate page state
+                        except:
+                            continue
+                
+                if not clicked:
                     break
-            
+
             content = await page.content()
             await page.close()
         else:
             content = response.text
 
-        # === STRATEGY 1: JSON-LD (Structured Data) ===
+        # === STRATEGY 1: JSON-LD ===
         base_url = response.url
         data = extruct.extract(content, base_url=base_url, syntaxes=['json-ld'])
-        
         events_found = []
         for item in data.get('json-ld', []):
             if item.get('@type') in ['Event', 'MusicEvent', 'DanceEvent', 'SocialEvent', 'EducationEvent']:
@@ -89,92 +97,65 @@ class UniversalSpider(scrapy.Spider):
             self.logger.info(f"SUCCESS: Found {len(events_found)} events via JSON-LD.")
             for e in events_found:
                 yield e
-            return # Exit to save tokens
+            return 
 
-        # === STRATEGY 2: Gemini LLM Fallback ===
-        self.logger.info("No JSON-LD found. Falling back to Gemini LLM...")
-        
+        # === STRATEGY 2: Gemini LLM ===
         if not self.model:
-            self.logger.error("Gemini model not configured. Skipping LLM extraction.")
             return
 
-        # 1. Convert HTML to clean text
         h = html2text.HTML2Text()
         h.ignore_links = True
         h.ignore_images = True
         h.body_width = 0
         text_content = h.handle(content)
 
-        # 2. Call Gemini
-        extracted_data = self.call_gemini(text_content)
+        # !!! CRITICAL FIX: Increased limit from 25,000 to 300,000 !!!
+        # Gemini 1.5 Flash has a 1M token window. 300k chars is safe and necessary for full pages.
+        extracted_data = self.call_gemini(text_content[:300000])
         
         if extracted_data:
             self.logger.info(f"SUCCESS: Gemini extracted {len(extracted_data)} events.")
-            for i, event_data in enumerate(extracted_data[:self.MAX_EVENTS]):
+            for event_data in extracted_data[:self.MAX_EVENTS]:
                 yield self.normalize_llm_data(event_data, response.url)
 
     def call_gemini(self, text_content):
-        """Send text to Gemini and get JSON back"""
+        self.logger.info(f"Calling Gemini with {len(text_content)} characters...")
         
-        self.logger.info(f"Calling Gemini with {len(text_content)} characters of text...")
-        
-        # Define the schema structure for Gemini
         prompt = f"""
-        You are an expert event data extractor. 
-        Analyze the text below and extract all events into a JSON list.
-
+        You are an expert event data extractor.
+        Extract a list of events from the text below.
+        
         Input Text:
-        {text_content[:25000]}
+        {text_content}
 
-        Output Instructions:
-        1. Return ONLY a valid JSON List of objects. No markdown formatting.
-        2. Use this schema for each event:
+        Instructions:
+        1. Return ONLY a raw JSON List of objects. No Markdown (```json).
+        2. Look for patterns like "Date", "Time", "Location" headers.
+        3. If a specific year is not mentioned, assume the next upcoming occurrence relative to today.
+        4. Schema:
            {{
              "event_name": "string",
-             "date_iso": "YYYY-MM-DD" (or null if missing),
-             "time": "HH:MM" (or null if missing),
-             "location": "string" (or null),
-             "description": "short summary string",
-             "extra_attributes": {{ "key": "value" }} (Put price, speakers, organizers here)
+             "date_iso": "YYYY-MM-DD",
+             "time": "HH:MM",
+             "location": "string",
+             "description": "summary",
+             "extra_attributes": {{ "price": "...", "organizer": "..." }}
            }}
-        3. If a field is missing, strictly set it to null.
         """
 
         try:
-            # Generate content
-            self.logger.info("Sending request to Gemini API...")
             response = self.model.generate_content(
                 prompt,
                 generation_config=genai.types.GenerationConfig(
                     response_mime_type="application/json"
                 )
             )
-            
-            self.logger.info(f"Gemini response received. Raw text length: {len(response.text) if response.text else 0}")
-            self.logger.debug(f"Gemini raw response (first 500 chars): {response.text[:500] if response.text else 'None'}")
-            
-            result = json.loads(response.text)
-            
-            # Handle if Gemini wraps it in a root object like {"events": [...]}
-            if isinstance(result, dict):
-                # Look for a list value inside the dict
-                for key, value in result.items():
-                    if isinstance(value, list):
-                        self.logger.info(f"Found {len(value)} events in nested dict key '{key}'")
-                        return value
-                # If no list found, maybe the dict itself is a single event
-                self.logger.info("Single event dict found")
-                return [result]
-            
-            self.logger.info(f"Direct list returned with {len(result)} events")
-            return result
-            
+            return json.loads(response.text)
         except Exception as e:
-            import traceback
-            self.logger.error(f"Gemini Extraction failed: {e}")
-            self.logger.error(f"Full traceback: {traceback.format_exc()}")
+            self.logger.error(f"Gemini failed: {e}")
             return []
 
+    # ... (Keep parse_json_ld and normalize_llm_data as they were) ...
     def parse_json_ld(self, data):
         """Normalize Schema.org data"""
         item = EventCategoryItem()
@@ -190,7 +171,7 @@ class UniversalSpider(scrapy.Spider):
             
         item['description'] = data.get('description')
         item['event_url'] = data.get('url') or data.get('@id')
-        item['extra_attributes'] = {} # Empty for JSON-LD usually
+        item['extra_attributes'] = {} 
         return item
 
     def normalize_llm_data(self, data, source_url):
