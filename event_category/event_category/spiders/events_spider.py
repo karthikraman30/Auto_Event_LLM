@@ -48,41 +48,64 @@ TARGET_GROUP_MAPPING = {
 def parse_swedish_date(date_str):
     """
     Parse Swedish date string to ISO format (YYYY-MM-DD).
-    Handles formats like:
-    - "22 december"
-    - "22 december 2024"
-    - "22 dec - 25 dec" (returns first date)
+    Returns tuple: (start_date, end_date)
+    If single day, end_date is "N/A".
     """
     if not date_str:
-        return ""
+        return "", "N/A"
     
     date_str = date_str.lower().strip()
     
-    # Handle date ranges - take the first date
+    # Helper to parse "22 december [2024]"
+    def parse_single(d_str, default_year=None):
+        match = re.search(r'(\d{1,2})\s+([a-zåäö]+)(?:\s+(\d{4}))?', d_str)
+        if match:
+            day = int(match.group(1))
+            month_name = match.group(2)
+            year = int(match.group(3)) if match.group(3) else default_year
+            
+            if not year:
+                year = datetime.now().year
+
+            month = None
+            for sw_month, num in SWEDISH_MONTHS.items():
+                if month_name.startswith(sw_month[:3]): 
+                    month = num
+                    break
+            
+            if month:
+                try:
+                    return datetime(year, month, day)
+                except ValueError:
+                    pass
+        return None
+
+    # Handle range
     if ' - ' in date_str or '–' in date_str:
-        date_str = re.split(r'\s*[-–]\s*', date_str)[0]
+        parts = re.split(r'\s*[-–]\s*', date_str)
+        if len(parts) >= 2:
+            start_str = parts[0]
+            end_str = parts[1]
+            
+            end_dt = parse_single(end_str)
+            if end_dt:
+                # Use end date year as default for start date if missing
+                start_dt = parse_single(start_str, default_year=end_dt.year)
+                
+                # Handle year rollover (e.g. Dec 22 - Jan 2)
+                # If start month is > end month, assume start year is previous year
+                if start_dt and start_dt.month > end_dt.month and start_dt.year == end_dt.year:
+                    start_dt = start_dt.replace(year=start_dt.year - 1)
+                
+                if start_dt:
+                    return start_dt.strftime('%Y-%m-%d'), end_dt.strftime('%Y-%m-%d')
     
-    # Try to extract day and month
-    match = re.search(r'(\d{1,2})\s+(\w+)(?:\s+(\d{4}))?', date_str)
-    if match:
-        day = int(match.group(1))
-        month_name = match.group(2)
-        year = int(match.group(3)) if match.group(3) else datetime.now().year
-        
-        # Find the month number
-        month = None
-        for sw_month, num in SWEDISH_MONTHS.items():
-            if month_name.startswith(sw_month[:3]):  # Match first 3 chars
-                month = num
-                break
-        
-        if month:
-            try:
-                return datetime(year, month, day).strftime('%Y-%m-%d')
-            except ValueError:
-                pass
+    # Fallback / Single date
+    dt = parse_single(date_str)
+    if dt:
+        return dt.strftime('%Y-%m-%d'), "N/A"
     
-    return ""
+    return "", "N/A"
 
 
 def normalize_target_group(target_group_str):
@@ -160,10 +183,10 @@ class EventsSpider(scrapy.Spider):
     ]
     
     # Configure max events to scrape PER URL (set to 0 or None for unlimited)
-    MAX_EVENTS = 30  # Set to 0 for all events, or a number to limit
+    MAX_EVENTS = 50  # Set to 0 for all events, or a number to limit
     
     # Date filter: only include events within this many days from today (set to 0 to disable)
-    DATE_FILTER_DAYS = 30  # 1 month = ~30 days
+    DATE_FILTER_DAYS = 0  # Disabled - show all events
 
     def start_requests(self):
         for url in self.start_urls:
@@ -263,7 +286,9 @@ class EventsSpider(scrapy.Spider):
             
             # Extract time (Tid)
             time_parts = event.xpath(".//p[b[contains(text(), 'Tid:')]]/time/text()").getall()
-            time = "-".join(time_parts).strip() if time_parts else ""
+            time = "-".join(time_parts).strip()
+            if not time:
+                time = "N/A"
             
             # Extract location - look for paragraph with location pin icon
             location_candidates = event.xpath(".//section//p[span and not(b)]/text()").getall()
@@ -308,7 +333,9 @@ class EventsSpider(scrapy.Spider):
         # Get basic info passed from the listing page
         item["event_name"] = response.meta.get("event_name", "")
         item["date"] = response.meta.get("date", "")
-        item["date_iso"] = parse_swedish_date(item["date"])  # Parse to ISO format
+        start_date, end_date = parse_swedish_date(item["date"])
+        item["date_iso"] = start_date
+        item["end_date_iso"] = end_date
         item["time"] = response.meta.get("time", "")
         item["location"] = response.meta.get("location", "")
         item["target_group"] = response.meta.get("target_group", "")

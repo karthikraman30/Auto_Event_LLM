@@ -11,6 +11,7 @@ class EventCategoryItem(scrapy.Item):
     event_name = scrapy.Field()
     date = scrapy.Field()
     date_iso = scrapy.Field()  # Parsed date in ISO format (YYYY-MM-DD)
+    end_date_iso = scrapy.Field()  # Parsed end date in ISO format (YYYY-MM-DD) or "N/A"
     time = scrapy.Field()
     location = scrapy.Field()
     target_group = scrapy.Field()
