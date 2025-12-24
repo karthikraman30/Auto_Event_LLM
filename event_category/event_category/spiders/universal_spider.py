@@ -1,5 +1,4 @@
 import scrapy
-import html2text
 import json
 import os
 import re
@@ -7,14 +6,17 @@ from datetime import datetime, timedelta
 import google.generativeai as genai
 from scrapy_playwright.page import PageMethod
 from event_category.items import EventCategoryItem
+from event_category.utils.db_manager import DatabaseManager
 
 class MultiSiteEventSpider(scrapy.Spider):
     name = "universal_events"
     
-    # 1. DEFINE YOUR TARGET WEBSITES HERE
+    # 1. FINAL URL LIST (All 4 Sites)
     start_urls = [
-        "https://biblioteket.stockholm.se/evenemang"
-
+        "https://biblioteket.stockholm.se/evenemang",
+        "https://biblioteket.stockholm.se/forskolor",
+        "https://www.tekniskamuseet.se/pa-gang/?date=",
+        "https://www.modernamuseet.se/stockholm/sv/kalender/"
     ]
 
     def configure_gemini(self):
@@ -27,10 +29,16 @@ class MultiSiteEventSpider(scrapy.Spider):
 
     def start_requests(self):
         self.model = self.configure_gemini()
+        self.db = DatabaseManager()
         if not self.model:
             return
 
-        for url in self.start_urls:
+        # Support single URL mode for parallel execution
+        single_url = getattr(self, 'url', None)
+        urls_to_process = [single_url] if single_url else self.start_urls
+
+        for url in urls_to_process:
+
             yield scrapy.Request(
                 url,
                 meta={
@@ -38,7 +46,7 @@ class MultiSiteEventSpider(scrapy.Spider):
                     "playwright_include_page": True,
                     "playwright_page_methods": [
                         PageMethod("wait_for_load_state", "networkidle"),
-                        PageMethod("wait_for_timeout", 3000), # Wait for initial JS
+                        PageMethod("wait_for_timeout", 3000), 
                     ],
                 },
                 callback=self.parse
@@ -52,21 +60,24 @@ class MultiSiteEventSpider(scrapy.Spider):
 
         self.logger.info(f"Processing Site: {response.url}")
         
-        # === STEP A: AGGREGATE TEXT (Scroll & Click 'Load More') ===
-        # This combines content from the whole listing into one text block
-        
-        # 1. Scroll to trigger lazy loading
+        # === STEP A: COOKIE CONSENT ===
+        try:
+            cookie_btns = page.locator("button:has-text('Godkänn'), button:has-text('Acceptera'), button:has-text('Jag förstår'), button[id*='cookie']")
+            if await cookie_btns.count() > 0:
+                await cookie_btns.first.click(force=True, timeout=2000)
+                await page.wait_for_timeout(1000)
+        except: pass
+
+        # === STEP B: SCROLL & LOAD MORE ===
         for _ in range(4): 
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             await page.wait_for_timeout(1000)
 
-        # 2. Universal 'Load More' Clicker
-        # Clicks up to 15 times to get enough events for the month
-        load_words = ["Visa fler", "Ladda fler", "Load more", "Show more", "More events", "Nästa"]
-        for _ in range(15): 
+        # Click Load More ~40 times (Covers approx 45 days)
+        load_words = ["Visa fler", "Ladda fler", "Load more", "Show more", "More events", "Nästa", "Visa alla"]
+        for _ in range(40): 
             clicked = False
             for word in load_words:
-                # Look for buttons/links containing these words
                 btn = page.locator(f"button:has-text('{word}'), a:has-text('{word}')").first
                 if await btn.count() > 0 and await btn.is_visible():
                     try:
@@ -74,121 +85,273 @@ class MultiSiteEventSpider(scrapy.Spider):
                         await btn.click(force=True, timeout=5000)
                         await page.wait_for_timeout(2000)
                         clicked = True
-                        break # Move to next click iteration
+                        break 
                     except: pass
-            if not clicked: break # No more buttons found
+            if not clicked: break 
 
-        content = await page.content()
-        await page.close()
-
-        # === STEP B: CLEAN HTML TO TEXT ===
-        h = html2text.HTML2Text()
-        h.ignore_links = True
-        h.ignore_images = True
-        h.body_width = 0
-        # Reduce noise by ignoring nav/footer if possible, but raw HTML2Text is usually fine for LLMs
-        text_content = h.handle(content)
-
-        # === STEP C: AI ENGINE (Map Columns) ===
-        # Process content in chunks to capture all events
-        chunk_size = 20000
-        all_extracted_data = []
-        
-        # Split content into chunks and process each
-        for i in range(0, min(len(text_content), 80000), chunk_size):
-            chunk = text_content[i:i + chunk_size]
-            self.logger.info(f"Processing chunk {i // chunk_size + 1} (chars {i} to {i + len(chunk)})")
-            chunk_data = self.call_ai_engine(chunk)
-            if chunk_data:
-                all_extracted_data.extend(chunk_data)
-        
-        # Remove duplicates by event_name + date_iso
-        seen = set()
+        # === STEP C: ATTEMPT FAST PATH (SELECTORS) ===
+        selectors = self.db.get_selectors(response.url)
         extracted_data = []
-        for event in all_extracted_data:
-            key = (event.get('event_name', ''), event.get('date_iso', ''))
-            if key not in seen:
-                seen.add(key)
-                extracted_data.append(event)
+        fast_path_success = False
+
+        if selectors:
+            self.logger.info(f"Pointers found for {response.url}. Attempting Fast Path...")
+            fast_data = await self.extract_with_selectors(page, selectors)
+            if fast_data and len(fast_data) > 0:
+                self.logger.info(f"Fast Path extracted {len(fast_data)} events.")
+                extracted_data = fast_data
+                fast_path_success = True
+            else:
+                self.logger.info("Fast Path failed or returned no data. Falling back to AI Path.")
+
+        # === STEP D: AI PATH (IF FAST PATH FAILED) ===
+        if not fast_path_success:
+            self.logger.info("Extracting event elements for AI processing...")
+            # Broad selectors for all 4 sites
+            selector_str = (
+                'article, '
+                'div[class*="event"], li[class*="event"], '
+                '.card, .teaser, .program-item, '
+                '.activity, .listing-item, .c-card'
+            )
+            event_elements = await page.locator(selector_str).all()
+            
+            if not event_elements:
+                 self.logger.info("Generic selectors found nothing. Trying broad 'article' tag.")
+                 event_elements = await page.locator('article').all()
+
+            self.logger.info(f"Found {len(event_elements)} potential event elements")
+
+            event_batches = []
+            current_batch = []
+            html_snippets = []
+            
+            for i, element in enumerate(event_elements):
+                try:
+                    text = await element.inner_text()
+                    clean_text = re.sub(r'\n+', '\n', text).strip()
+                    
+                    if len(clean_text) > 40:  
+                        current_batch.append(clean_text)
+                        # Keep first 3 HTML snippets for selector discovery
+                        if i < 3:
+                            html_snippets.append(await element.inner_html())
+                    
+                    if len(current_batch) >= 5:
+                        event_batches.append("\n---\n".join(current_batch))
+                        current_batch = []
+                except Exception as e:
+                    self.logger.warning(f"Error extracting text from element: {e}")
+            
+            if current_batch:
+                event_batches.append("\n---\n".join(current_batch))
+
+            # Process batches with AI
+            all_extracted_data = []
+            for i, batch_text in enumerate(event_batches):
+                self.logger.info(f"Processing batch {i+1}/{len(event_batches)}")
+                # For the first batch, we ask for selectors too and pass HTML
+                if i == 0:
+                    ai_result = self.call_ai_engine(batch_text, include_selectors=True, html_context=html_snippets)
+                    if ai_result:
+                        data = ai_result.get('events', [])
+                        discovered_selectors = ai_result.get('selectors')
+                        if discovered_selectors:
+                            self.logger.info(f"AI discovered selectors: {discovered_selectors}")
+                            self.db.save_selectors(
+                                response.url, 
+                                discovered_selectors.get('container'),
+                                discovered_selectors.get('items')
+                            )
+                        all_extracted_data.extend(data)
+                else:
+                    ai_result = self.call_ai_engine(batch_text, include_selectors=False)
+                    if ai_result:
+                        all_extracted_data.extend(ai_result if isinstance(ai_result, list) else ai_result.get('events', []))
+            
+            # Deduplication
+            seen = set()
+            for event in all_extracted_data:
+                key = (event.get('event_name', ''), event.get('date_iso', ''))
+                if key not in seen:
+                    seen.add(key)
+                    extracted_data.append(event)
+
+        await page.close()
         
-        # === STEP D: FILTER & STORE ===
+        # === STEP E: FILTER & STORE ===
         today = datetime.now().date()
-        next_month = today + timedelta(days=30)
+        limit_date = today + timedelta(days=45) 
         
         if extracted_data:
-            self.logger.info(f"AI extracted {len(extracted_data)} raw events from {response.url}")
+            self.logger.info(f"AI extracted {len(extracted_data)} unique events. Filtering dates...")
             
             for event_data in extracted_data:
-                # 1. Map AI output to our Item Columns
                 item = EventCategoryItem()
                 item['event_name'] = event_data.get('event_name') or 'Unknown Event'
                 item['location'] = event_data.get('location') or 'N/A'
                 item['time'] = event_data.get('time') or 'N/A'
                 item['description'] = event_data.get('description') or 'N/A'
-                item['event_url'] = response.url # Link back to the main list
-                item['status'] = 'scheduled'
+                item['event_url'] = response.url 
+                item['end_date_iso'] = event_data.get('end_date_iso') or 'N/A'
                 
-                # 2. Date Parsing & Filtering (Next 1 Month)
-                date_str = event_data.get('date_iso') # AI returns YYYY-MM-DD
-                
-                if date_str:
-                    try:
-                        event_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-                        
-                        # LOGIC: Filter for next 1 month
-                        if today <= event_date <= next_month:
-                            item['date_iso'] = date_str
-                            item['date'] = date_str
-                            item['target_group'] = event_data.get('target_group', 'All')
-                            # Normalize target group roughly for Excel
-                            item['target_group_normalized'] = self.simple_normalize(item['target_group'])
-                            
-                            yield item
-                        else:
-                            self.logger.debug(f"Skipping date {event_date}: Outside 1-month range")
-                            
-                    except ValueError:
-                        self.logger.warning(f"Date parse error: {date_str}")
-                        continue
+                # --- STATUS CHECK ---
+                raw_status = event_data.get('status', 'scheduled').lower()
+                if 'cancel' in raw_status or 'inst' in raw_status:
+                    item['status'] = 'cancelled'
+                else:
+                    item['status'] = 'scheduled'
 
-    def call_ai_engine(self, text_content):
+                # --- TARGET GROUP LOGIC ---
+                # 1. STRICT OVERRIDE: If URL contains "forskolor", FORCE PRESCHOOL
+                if "forskolor" in response.url:
+                    item['target_group'] = "Preschool"
+                    item['target_group_normalized'] = "preschool_groups"
+                else:
+                    # 2. STANDARD LOGIC: Use AI detection + Age Parsing
+                    item['target_group'] = event_data.get('target_group', 'All')
+                    item['target_group_normalized'] = self.simple_normalize(item['target_group'])
+
+                # --- DATE PARSING & FILTERING ---
+                date_str = event_data.get('date_iso')
+                
+                if not date_str:
+                    continue
+
+                try:
+                    event_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                    
+                    if today <= event_date <= limit_date:
+                        item['date_iso'] = date_str
+                        item['date'] = date_str
+                        yield item
+                    else:
+                        pass 
+                        
+                except ValueError:
+                    continue
+
+    async def extract_with_selectors(self, page, selectors):
+        extracted = []
+        container_sel = selectors.get('container')
+        item_map = selectors.get('items', {})
+        
+        if not container_sel: return []
+        
+        elements = await page.locator(container_sel).all()
+        for el in elements:
+            item = {}
+            for field, sel in item_map.items():
+                try:
+                    target = el.locator(sel).first
+                    if await target.count() > 0:
+                        item[field] = await target.inner_text()
+                    else:
+                        item[field] = None
+                except:
+                    item[field] = None
+            
+            if item.get('event_name'):
+                # Basic cleaning for Fast Path
+                item['event_name'] = item['event_name'].strip()
+                extracted.append(item)
+        return extracted
+
+    def call_ai_engine(self, text_content, include_selectors=False, html_context=None):
+        selector_instructions = ""
+        html_section = ""
+        json_format = """
+        [
+          {
+            "event_name": "Event Name",
+            "date_iso": "2025-12-01",
+            "end_date_iso": null,
+            "time": "10:00",
+            "location": "Venue",
+            "target_group": "Adults",
+            "description": "Short description.",
+            "status": "scheduled"
+          }
+        ]
         """
-        The 'AI Engine' that maps scraped text to columns using Gemini.
-        """
+        
+        if include_selectors:
+            if html_context:
+                html_snippets_str = "\n---\n".join(html_context[:3])
+                html_section = f"""
+                STRUCTURE CONTEXT (HTML snippets of events):
+                {html_snippets_str}
+                """
+
+            selector_instructions = """
+            6. SELECTOR DISCOVERY:
+               - Based on the provided HTML structure, identify the most reliable CSS selector for the event container.
+               - Identify CSS selectors for EACH field (relative to the container).
+               - Use stable classes or tags. Avoid dynamic IDs.
+            """
+            json_format = """
+            {
+              "events": [
+                {
+                  "event_name": "Event Name",
+                  "date_iso": "2025-12-01",
+                  "end_date_iso": null,
+                  "time": "10:00",
+                  "location": "Venue",
+                  "target_group": "Adults",
+                  "description": "Short description.",
+                  "status": "scheduled"
+                }
+              ],
+              "selectors": {
+                "container": "article.event-card",
+                "items": {
+                  "event_name": "h2",
+                  "date_iso": ".date",
+                  "time": ".time",
+                  "location": ".venue",
+                  "description": ".teaser"
+                }
+              }
+            }
+            """
+
         prompt = f"""
         You are an Event Extraction Engine.
         Task: Extract a list of events from the text below.
         
+        {html_section}
+        
+        Input Format: The text contains multiple event listings separated by "---".
+        
         Current Date: {datetime.now().strftime('%Y-%m-%d')}
-        IMPORTANT: For dates in January and beyond, use year 2026 (since current date is December 2025).
+        IMPORTANT: For dates in January and beyond, use year 2026.
         
         Input Text:
         {text_content}
         
         Requirements:
-        1. Output ONLY a valid JSON list of objects. No markdown, no code fences.
-        2. Extract fields: event_name, date_iso (YYYY-MM-DD), time, location, target_group (e.g. "Kids", "Adults"), description.
-        3. KEEP DESCRIPTIONS VERY SHORT - maximum 50 characters.
-        4. TIME EXTRACTION:
-           - If the event name contains time (e.g. "Fri fredag kl 18-20"), extract "18:00-20:00" to the time field.
-           - The event_name should NOT include the time - just the event title (e.g. "Fri fredag").
-           - Use 24-hour format for times (e.g., "14:00", "18:00-20:00").
+        1. Output ONLY a valid JSON. No markdown.
+        2. Extract fields: event_name, date_iso (YYYY-MM-DD), end_date_iso, time, location, target_group, description, status.
+        
+        3. STATUS LOGIC:
+           - Look for keywords like "Inställt", "Cancelled", "Fullbokat".
+           - If found, set "status": "cancelled".
+           - Otherwise, set "status": "scheduled".
+        
+        4. DESCRIPTION EXTRACTION:
+           - Extract the teaser text or subtitle. Max 250 chars.
+           - Do NOT return "N/A" if text is available.
+        
         5. DATE LOGIC:
-           - December 2025 dates: use 2025-12-XX
-           - January onwards dates: use 2026-01-XX, 2026-02-XX, etc.
-           - Convert written dates (e.g., "25 dec", "20 jan") to YYYY-MM-DD format.
+           - "date_iso": Start date.
+           - "end_date_iso": End date (or null).
+           - Convert Swedish months (december->12, januari->01).
+        
+        {selector_instructions}
         
         JSON Structure:
-        [
-          {{
-            "event_name": "Fri fredag",
-            "date_iso": "2025-12-26",
-            "time": "18:00-20:00",
-            "location": "Main Hall",
-            "target_group": "Adults",
-            "description": "Free Friday event with art"
-          }}
-        ]
+        {json_format}
         """
         
         try:
@@ -196,92 +359,69 @@ class MultiSiteEventSpider(scrapy.Spider):
                 prompt,
                 generation_config=genai.types.GenerationConfig(
                     temperature=0.1,
-                    max_output_tokens=8192,  # Prevent truncation
+                    max_output_tokens=8192, 
                 )
             )
-            
-            # Extract JSON from response, handling potential markdown code blocks
             response_text = response.text.strip()
-            
-            # Remove markdown code fences if present
             if response_text.startswith("```"):
-                # Remove opening fence (```json or ```)
                 response_text = re.sub(r'^```(?:json)?\n?', '', response_text)
-                # Remove closing fence
                 response_text = re.sub(r'\n?```$', '', response_text)
             
-            # Try to parse JSON, with fallback for truncated responses
             try:
                 result = json.loads(response_text)
-            except json.JSONDecodeError as json_err:
-                self.logger.warning(f"JSON parse error, attempting to fix: {json_err}")
-                # Try to fix truncated JSON by closing brackets
+            except json.JSONDecodeError:
                 fixed_text = response_text.rstrip()
-                # Remove any incomplete object/string at the end
-                if fixed_text.endswith(','):
-                    fixed_text = fixed_text[:-1]
-                # Count and close open brackets
+                if fixed_text.endswith(','): fixed_text = fixed_text[:-1]
                 open_braces = fixed_text.count('{') - fixed_text.count('}')
                 open_brackets = fixed_text.count('[') - fixed_text.count(']')
                 fixed_text += '}' * max(0, open_braces)
                 fixed_text += ']' * max(0, open_brackets)
                 result = json.loads(fixed_text)
             
-            # Handle variations in JSON structure (root object vs list)
             if isinstance(result, list): return result
             if isinstance(result, dict):
-                # Return the first list found in the dict
+                if include_selectors:
+                    return result
                 for val in result.values():
                     if isinstance(val, list): return val
             return []
-            
         except Exception as e:
             self.logger.error(f"AI Engine Error: {e}")
             return []
 
-    # Target group mapping for normalization
-    TARGET_GROUP_MAPPING = {
-        # Children (0-12)
-        'barn': 'children',
-        'bebis': 'children',
-        'småbarn': 'children',
-        'förskolebarn': 'children',
-        'kid': 'children',
-        'child': 'children',
-        # Teens (13-19)
-        'ungdom': 'teens',
-        'tonåring': 'teens',
-        'ungdomar': 'teens',
-        'teen': 'teens',
-        # Adults (20+)
-        'vuxen': 'adults',
-        'vuxna': 'adults',
-        'senior': 'adults',
-        'seniorer': 'adults',
-        'pensionär': 'adults',
-        'adult': 'adults',
-        # Families
-        'familj': 'families',
-        'familjer': 'families',
-        'family': 'families',
-        'families': 'families',
-        # All ages
-        'alla': 'all_ages',
-        'alla åldrar': 'all_ages',
-        'all': 'all_ages',
-        'general': 'all_ages',
-    }
-
     def simple_normalize(self, target_str):
-        """Normalize target group using comprehensive mapping"""
-        if not target_str:
-            return 'all_ages'
-        
+        """
+        Normalize target group using Age Parsing and Keywords.
+        """
+        if not target_str: return 'all_ages'
         t = target_str.lower()
         
-        # Check for exact or partial matches in mapping
-        for key, value in self.TARGET_GROUP_MAPPING.items():
-            if key in t:
-                return value
+        # --- 1. KEYWORD CHECKS ---
+        if 'barn' in t or 'kid' in t or 'bebis' in t or 'småbarn' in t or 'förskola' in t: 
+            return 'children'
         
+        if 'ungdom' in t or 'teen' in t or 'tonåring' in t or 'unga' in t: 
+            return 'teens'
+        
+        if 'familj' in t or 'family' in t: 
+            return 'families'
+            
+        if 'vuxen' in t or 'vuxna' in t or 'adult' in t or 'senior' in t: 
+            return 'adults'
+
+        # --- 2. AGE PARSING (e.g., "10-12 år", "Från 15 år") ---
+        age_match = re.search(r'(\d{1,2})(?:[-–\s]+(\d{1,2}))?\s*(?:år|year|age)', t)
+        
+        if age_match:
+            try:
+                min_age = int(age_match.group(1))
+                if min_age < 13:
+                    return 'children'
+                elif 13 <= min_age < 20:
+                    return 'teens'
+                else:
+                    return 'adults'
+            except:
+                pass
+
         return 'all_ages'
