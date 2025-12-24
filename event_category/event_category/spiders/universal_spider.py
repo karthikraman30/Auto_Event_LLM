@@ -3,10 +3,146 @@ import json
 import os
 import re
 from datetime import datetime, timedelta
-import google.generativeai as genai
+# [NEW] Import the new Google GenAI library
+from google import genai
 from scrapy_playwright.page import PageMethod
 from event_category.items import EventCategoryItem
 from event_category.utils.db_manager import DatabaseManager
+
+# Swedish month name to number mapping
+SWEDISH_MONTHS = {
+    'januari': 1, 'jan': 1,
+    'februari': 2, 'feb': 2,
+    'mars': 3, 'mar': 3,
+    'april': 4, 'apr': 4,
+    'maj': 5,
+    'juni': 6, 'jun': 6,
+    'juli': 7, 'jul': 7,
+    'augusti': 8, 'aug': 8,
+    'september': 9, 'sep': 9, 'sept': 9,
+    'oktober': 10, 'okt': 10,
+    'november': 11, 'nov': 11,
+    'december': 12, 'dec': 12,
+}
+
+def parse_swedish_date(date_str):
+    """
+    Parse Swedish date string to ISO format (YYYY-MM-DD).
+    Handles formats like: '25 december', 'tis 24 dec', '2025-01-15', '2025-12-26 10:30'
+    Returns None if parsing fails.
+    """
+    if not date_str:
+        return None
+    
+    date_str = date_str.strip().lower()
+    
+    # Already in ISO format (with or without time)?
+    # Handles: "2025-12-26" or "2025-12-26 10:30"
+    iso_match = re.match(r'^(\d{4}-\d{2}-\d{2})', date_str)
+    if iso_match:
+        return iso_match.group(1)  # Return just the date part
+    
+    # Try to extract day and month
+    # Pattern: optional weekday, day number, month name
+    match = re.search(r'(\d{1,2})\s+([a-zåäö]+)', date_str)
+    if match:
+        day = int(match.group(1))
+        month_name = match.group(2)
+        month = SWEDISH_MONTHS.get(month_name)
+        
+        if month:
+            today = datetime.now()
+            year = today.year
+            # If month is earlier than current month, assume next year
+            if month < today.month or (month == today.month and day < today.day):
+                year += 1
+            return f"{year}-{month:02d}-{day:02d}"
+    
+    return None
+
+def extract_time_only(time_str):
+    """
+    Extract only the time component from a datetime string.
+    Handles: "2025-12-26 10:30" → "10:30", "10.30" → "10:30", "Tid: 14:00-15:00" → "14:00-15:00"
+    """
+    if not time_str:
+        return 'N/A'
+    
+    time_str = time_str.strip()
+    
+    # Pattern 1: datetime format "2025-12-26 10:30" or "2025-12-26T10:30"
+    match = re.search(r'\d{4}-\d{2}-\d{2}[T\s](\d{1,2}[:.]\d{2}(?:[:.]\d{2})?)', time_str)
+    if match:
+        return match.group(1).replace('.', ':')
+    
+    # Pattern 2: Swedish format "Tid: 14:00-15:00" or "Tid: 14:00"
+    match = re.search(r'Tid:\s*(\d{1,2}[:.]\d{2}(?:\s*-\s*\d{1,2}[:.]\d{2})?)', time_str, re.IGNORECASE)
+    if match:
+        return match.group(1).replace('.', ':')
+    
+    # Pattern 3: Just time like "10:30" or "10.30" or "10:30-12:00"
+    match = re.search(r'^(\d{1,2}[:.]\d{2}(?:\s*-\s*\d{1,2}[:.]\d{2})?)$', time_str)
+    if match:
+        return match.group(1).replace('.', ':')
+    
+    return time_str  # Return as-is if no pattern matches
+
+def extract_target_from_name(event_name):
+    """
+    Extract target group from event name based on age patterns.
+    Examples: "för 3-6 år" → "children", "för 7 år och upp" → "children", 
+              "4-12 månader" → "babies"
+    Returns tuple: (target_group_display, target_group_normalized) or (None, None)
+    """
+    if not event_name:
+        return None, None
+    
+    name_lower = event_name.lower()
+    
+    # Pattern: babies (månader = months)
+    if 'månader' in name_lower or 'mån' in name_lower:
+        match = re.search(r'(\d+)[-–]?(\d+)?\s*månader?', name_lower)
+        if match:
+            return "Babies (0-12 months)", "babies"
+    
+    # Pattern: age ranges like "3-6 år", "för 3–6 år", "7 år och upp"
+    match = re.search(r'(?:för\s+)?(\d+)[-–](\d+)\s*år', name_lower)
+    if match:
+        min_age = int(match.group(1))
+        max_age = int(match.group(2))
+        
+        if max_age <= 6:
+            return f"Children ({min_age}-{max_age} years)", "children"
+        elif min_age <= 12:
+            return f"Children ({min_age}-{max_age} years)", "children"
+        elif min_age < 18:
+            return f"Teens ({min_age}-{max_age} years)", "teens"
+        else:
+            return f"Adults ({min_age}+ years)", "adults"
+    
+    # Pattern: "för X år och upp" or "från X år" - MUST have keyword prefix
+    # Avoids false positives like "Rauschenberg 100 år"
+    match = re.search(r'(?:för|från)\s+(\d+)\s*år(?:\s*och\s*upp|\s*uppåt|\s*\+)?', name_lower)
+    if match:
+        min_age = int(match.group(1))
+        if min_age <= 6:
+            return f"Children ({min_age}+ years)", "children"
+        elif min_age <= 12:
+            return f"Children ({min_age}+ years)", "children"
+        elif min_age < 18:
+            return f"Teens ({min_age}+ years)", "teens"
+        else:
+            return f"Adults ({min_age}+ years)", "adults"
+    
+    # Keywords for families
+    if 'familj' in name_lower or 'family' in name_lower:
+        return "Families", "families"
+    
+    # Keywords for babies
+    if 'baby' in name_lower or 'bebis' in name_lower:
+        return "Babies", "babies"
+    
+    return None, None
 
 class MultiSiteEventSpider(scrapy.Spider):
     name = "universal_events"
@@ -15,22 +151,26 @@ class MultiSiteEventSpider(scrapy.Spider):
     start_urls = [
         "https://biblioteket.stockholm.se/evenemang",
         "https://biblioteket.stockholm.se/forskolor",
-        "https://www.tekniskamuseet.se/pa-gang/?date=",
-        "https://www.modernamuseet.se/stockholm/sv/kalender/"
+        # "https://armemuseum.se/kalender/",
+        # "https://www.modernamuseet.se/stockholm/sv/kalender/"
     ]
 
     def configure_gemini(self):
+        """Initialize the Gemini Client using the new SDK."""
         api_key = self.settings.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
         if not api_key:
             self.logger.error("GEMINI_API_KEY is missing! Set it in .env file.")
             return None
-        genai.configure(api_key=api_key)
-        return genai.GenerativeModel("gemini-2.0-flash")
+        
+        # [NEW] Return the Client object
+        return genai.Client(api_key=api_key)
 
     def start_requests(self):
-        self.model = self.configure_gemini()
+        self.client = self.configure_gemini()
         self.db = DatabaseManager()
-        if not self.model:
+        
+        if not self.client:
+            self.logger.critical("Failed to initialize Gemini Client. Stopping spider.")
             return
 
         # Support single URL mode for parallel execution
@@ -38,7 +178,6 @@ class MultiSiteEventSpider(scrapy.Spider):
         urls_to_process = [single_url] if single_url else self.start_urls
 
         for url in urls_to_process:
-
             yield scrapy.Request(
                 url,
                 meta={
@@ -112,7 +251,8 @@ class MultiSiteEventSpider(scrapy.Spider):
                 'article, '
                 'div[class*="event"], li[class*="event"], '
                 '.card, .teaser, .program-item, '
-                '.activity, .listing-item, .c-card'
+                '.activity, .listing-item, .c-card, '
+                '#properties-list > a'
             )
             event_elements = await page.locator(selector_str).all()
             
@@ -181,16 +321,21 @@ class MultiSiteEventSpider(scrapy.Spider):
         
         # === STEP E: FILTER & STORE ===
         today = datetime.now().date()
-        limit_date = today + timedelta(days=45) 
+        limit_date = today + timedelta(days=30)  # 1 month from today
         
         if extracted_data:
             self.logger.info(f"AI extracted {len(extracted_data)} unique events. Filtering dates...")
             
             for event_data in extracted_data:
                 item = EventCategoryItem()
-                item['event_name'] = event_data.get('event_name') or 'Unknown Event'
+                event_name = event_data.get('event_name') or 'Unknown Event'
+                item['event_name'] = event_name
                 item['location'] = event_data.get('location') or 'N/A'
-                item['time'] = event_data.get('time') or 'N/A'
+                
+                # Extract only time component (not full datetime)
+                raw_time = event_data.get('time') or 'N/A'
+                item['time'] = extract_time_only(raw_time)
+                
                 item['description'] = event_data.get('description') or 'N/A'
                 item['event_url'] = response.url 
                 item['end_date_iso'] = event_data.get('end_date_iso') or 'N/A'
@@ -208,25 +353,41 @@ class MultiSiteEventSpider(scrapy.Spider):
                     item['target_group'] = "Preschool"
                     item['target_group_normalized'] = "preschool_groups"
                 else:
-                    # 2. STANDARD LOGIC: Use AI detection + Age Parsing
-                    item['target_group'] = event_data.get('target_group', 'All')
-                    item['target_group_normalized'] = self.simple_normalize(item['target_group'])
+                    # 2. Try to extract target group from event name (age patterns)
+                    name_target, name_target_norm = extract_target_from_name(event_name)
+                    if name_target:
+                        item['target_group'] = name_target
+                        item['target_group_normalized'] = name_target_norm
+                    else:
+                        # 3. FALLBACK: Use AI detection + Age Parsing
+                        item['target_group'] = event_data.get('target_group', 'All')
+                        item['target_group_normalized'] = self.simple_normalize(item['target_group'])
 
                 # --- DATE PARSING & FILTERING ---
-                date_str = event_data.get('date_iso')
+                raw_date = event_data.get('date_iso')
                 
-                if not date_str:
+                if not raw_date:
                     continue
 
+                # Try parsing Swedish date format (from Fast Path) or ISO format (from AI)
+                date_str = parse_swedish_date(raw_date)
+                if not date_str:
+                    # If parse_swedish_date returns None, skip this event
+                    continue
+                
                 try:
                     event_date = datetime.strptime(date_str, "%Y-%m-%d").date()
                     
                     if today <= event_date <= limit_date:
                         item['date_iso'] = date_str
                         item['date'] = date_str
-                        yield item
-                    else:
-                        pass 
+                        # [new] Instead of yielding item, go to detail page
+                        yield scrapy.Request(
+                            item['event_url'],
+                            callback=self.parse_details,
+                            meta={'item': item},
+                            dont_filter=True 
+                        )
                         
                 except ValueError:
                     continue
@@ -245,7 +406,20 @@ class MultiSiteEventSpider(scrapy.Spider):
                 try:
                     target = el.locator(sel).first
                     if await target.count() > 0:
-                        item[field] = await target.inner_text()
+                        value = None
+                        
+                        # For date/time fields, try to get datetime attribute from <time> elements
+                        if field in ('date_iso', 'time') and 'time' in sel:
+                            # Try to get the datetime attribute first
+                            datetime_attr = await target.get_attribute('datetime')
+                            if datetime_attr:
+                                value = datetime_attr
+                            else:
+                                value = await target.inner_text()
+                        else:
+                            value = await target.inner_text()
+                        
+                        item[field] = value.strip() if value else None
                     else:
                         item[field] = None
                 except:
@@ -257,7 +431,37 @@ class MultiSiteEventSpider(scrapy.Spider):
                 extracted.append(item)
         return extracted
 
-    def call_ai_engine(self, text_content, include_selectors=False, html_context=None):
+    async def parse_details(self, response):
+        item = response.meta['item']
+        self.logger.info(f"Extracting details for: {item['event_name']}")
+        
+        # simple text extraction
+        text = " ".join(response.xpath('//body//text()').getall())
+        text = re.sub(r'\s+', ' ', text).strip()
+        
+        input_text = f"Event Name: {item['event_name']}\n\n" + text[:8000]
+        ai_result = self.call_ai_engine(input_text, extract_details=True)
+        
+        if ai_result:
+             # handle list return (take first item)
+             if isinstance(ai_result, list) and len(ai_result) > 0:
+                 details = ai_result[0]
+             elif isinstance(ai_result, dict):
+                 details = ai_result
+             else:
+                 details = {}
+
+             if details.get('description'):
+                 item['description'] = details['description']
+             if details.get('location'):
+                 item['location'] = details['location']
+             if details.get('target_group'):
+                 item['target_group'] = details['target_group']
+                 item['target_group_normalized'] = self.simple_normalize(details['target_group'])
+        
+        yield item
+
+    def call_ai_engine(self, text_content, include_selectors=False, html_context=None, **kwargs):
         selector_instructions = ""
         html_section = ""
         json_format = """
@@ -316,53 +520,82 @@ class MultiSiteEventSpider(scrapy.Spider):
             }
             """
 
-        prompt = f"""
-        You are an Event Extraction Engine.
-        Task: Extract a list of events from the text below.
-        
-        {html_section}
-        
-        Input Format: The text contains multiple event listings separated by "---".
-        
-        Current Date: {datetime.now().strftime('%Y-%m-%d')}
-        IMPORTANT: For dates in January and beyond, use year 2026.
-        
-        Input Text:
-        {text_content}
-        
-        Requirements:
-        1. Output ONLY a valid JSON. No markdown.
-        2. Extract fields: event_name, date_iso (YYYY-MM-DD), end_date_iso, time, location, target_group, description, status.
-        
-        3. STATUS LOGIC:
-           - Look for keywords like "Inställt", "Cancelled", "Fullbokat".
-           - If found, set "status": "cancelled".
-           - Otherwise, set "status": "scheduled".
-        
-        4. DESCRIPTION EXTRACTION:
-           - Extract the teaser text or subtitle. Max 250 chars.
-           - Do NOT return "N/A" if text is available.
-        
-        5. DATE LOGIC:
-           - "date_iso": Start date.
-           - "end_date_iso": End date (or null).
-           - Convert Swedish months (december->12, januari->01).
-        
-        {selector_instructions}
-        
-        JSON Structure:
-        {json_format}
-        """
+        if kwargs.get('extract_details'):
+            json_format = """
+            {
+              "description": "Full description...",
+              "location": "Full address...",
+              "target_group": "Children (3-6 years)"
+            }
+            """
+            prompt = f"""
+            Task: Extract event details from the text below.
+            
+            Input Text:
+            {text_content}
+            
+            Fields to Extract:
+            1. description: The full event description.
+            2. location: The specific room, place, or address.
+            3. target_group: Who is this for? (e.g. "Adults", "Children 3-5 years", "Families").
+            
+            Return JSON only.
+            {json_format}
+            """
+        else:
+            prompt = f"""
+            You are an Event Extraction Engine.
+            Task: Extract a list of events from the text below.
+            
+            {html_section}
+            
+            Input Format: The text contains multiple event listings separated by "---".
+            
+            Current Date: {datetime.now().strftime('%Y-%m-%d')}
+            IMPORTANT: For dates in January and beyond, use year 2026.
+            
+            Input Text:
+            {text_content}
+            
+            Requirements:
+            1. Output ONLY a valid JSON. No markdown.
+            2. Extract fields: event_name, date_iso (YYYY-MM-DD), end_date_iso, time, location, target_group, description, status.
+            
+            3. STATUS LOGIC:
+               - Look for keywords like "Inställt", "Cancelled", "Fullbokat".
+               - If found, set "status": "cancelled".
+               - Otherwise, set "status": "scheduled".
+            
+            4. DESCRIPTION EXTRACTION:
+               - Extract the teaser text or subtitle. Max 250 chars.
+               - Do NOT return "N/A" if text is available.
+            
+            5. DATE LOGIC:
+               - "date_iso": Start date.
+               - "end_date_iso": End date (or null).
+               - Convert Swedish months (december->12, januari->01).
+            
+            {selector_instructions}
+            
+            JSON Structure:
+            {json_format}
+            """
         
         try:
-            response = self.model.generate_content(
-                prompt,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.1,
-                    max_output_tokens=8192, 
-                )
+            # [NEW] Use the new generate_content syntax
+            response = self.client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt,
+                config={
+                    "response_mime_type": "application/json",
+                    "temperature": 0.1,
+                }
             )
+            
+            # [NEW] Access text directly from the response object
             response_text = response.text.strip()
+            
+            # Clean up potential markdown formatting
             if response_text.startswith("```"):
                 response_text = re.sub(r'^```(?:json)?\n?', '', response_text)
                 response_text = re.sub(r'\n?```$', '', response_text)
@@ -370,6 +603,7 @@ class MultiSiteEventSpider(scrapy.Spider):
             try:
                 result = json.loads(response_text)
             except json.JSONDecodeError:
+                # Try simple auto-repair for truncated JSON
                 fixed_text = response_text.rstrip()
                 if fixed_text.endswith(','): fixed_text = fixed_text[:-1]
                 open_braces = fixed_text.count('{') - fixed_text.count('}')

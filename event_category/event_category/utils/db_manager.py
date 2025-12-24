@@ -10,7 +10,8 @@ class DatabaseManager:
         self._init_db()
 
     def _init_db(self):
-        conn = sqlite3.connect(self.db_path)
+        # Add timeout=30 (seconds) to wait for locks to clear
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS selector_configs (
@@ -31,7 +32,8 @@ class DatabaseManager:
         domain = parsed_url.netloc
         path = parsed_url.path or "/"
 
-        conn = sqlite3.connect(self.db_path)
+        # Add timeout for parallel access
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         cursor = conn.cursor()
         cursor.execute('''
             SELECT url_pattern, container_selector, item_selectors_json 
@@ -64,7 +66,8 @@ class DatabaseManager:
         # For saving, we use the specific path as the pattern unless provided otherwise
         pattern = path
 
-        conn = sqlite3.connect(self.db_path)
+        # Add timeout for parallel access
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO selector_configs (domain, url_pattern, container_selector, item_selectors_json, last_updated)
