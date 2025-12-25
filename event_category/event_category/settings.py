@@ -37,10 +37,10 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 # Obey robots.txt rules
 ROBOTSTXT_OBEY = True
 
-# Concurrency and throttling settings
-#CONCURRENT_REQUESTS = 16
-CONCURRENT_REQUESTS_PER_DOMAIN = 1
-DOWNLOAD_DELAY = 1
+# Concurrency and throttling settings (OPTIMIZED for speed)
+CONCURRENT_REQUESTS = 8  # [NEW] Enable parallel requests
+CONCURRENT_REQUESTS_PER_DOMAIN = 4  # [MODIFIED] Increase from 1 to 4
+DOWNLOAD_DELAY = 0.3  # [MODIFIED] Reduce from 1s to 0.3s
 
 # Disable cookies (enabled by default)
 #COOKIES_ENABLED = False

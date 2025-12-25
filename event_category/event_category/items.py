@@ -15,4 +15,5 @@ class EventCategoryItem(scrapy.Item):
     description = scrapy.Field()
     event_url = scrapy.Field()
     status = scrapy.Field()
+    booking_info = scrapy.Field()  # [NEW] "Requires booking", "Drop-in", or "N/A"
     extra_attributes = scrapy.Field()
