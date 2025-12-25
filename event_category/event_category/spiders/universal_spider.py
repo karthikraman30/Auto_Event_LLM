@@ -925,9 +925,22 @@ class MultiSiteEventSpider(scrapy.Spider):
                 
                 # [NEW] Extract booking info for Stockholm Library events
                 booking_status_raw = event_data.get('booking_status', '')
-                # Also check status_indicator for booking info (e.g. "Du behöver boka plats")
-                combined_booking_text = f"{booking_status_raw} {status_indicator}"
-                item['booking_info'] = extract_booking_info(combined_booking_text)
+                status_indicator = event_data.get('status_indicator', '') or ''
+                
+                combined_booking_text = f"{booking_status_raw} {status_indicator}".strip()
+                
+                if combined_booking_text and any(x in combined_booking_text.lower() for x in ['öppnar', 'stänger', 'boka', 'fullbokat']):
+                    # 1. Clean "None" artifacts
+                    clean_text = combined_booking_text.replace('None', '').strip()
+                    
+                    # 2. [NEW] Remove "Datum:" and everything following it
+                    # This transforms "Du behöver boka plats Datum: Söndag..." -> "Du behöver boka plats"
+                    if "Datum:" in clean_text:
+                        clean_text = clean_text.split("Datum:")[0].strip()
+                        
+                    item['booking_info'] = clean_text
+                else:
+                    item['booking_info'] = extract_booking_info(combined_booking_text)
                 
                 # [NEW] Clean "INSTÄLLT:" prefix from displayed event name
                 if event_name_lower.startswith('inställt:'):

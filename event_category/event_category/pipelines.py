@@ -45,8 +45,8 @@ class ExcelExportPipeline:
         # 4. Define Standard Headers
         fixed_headers = [
             "Event Name", "Date", "Date ISO", "End Date ISO", "Time", "Location", 
-            "Target Group", "Target Group Normalized", "Status",
-            "Description", "Event URL"
+            "Target Group", "Target Group Normalized", "Status", 
+            "Booking Info", "Description", "Event URL"
         ]
         
         # Combine Fixed Headers + Dynamic Headers
@@ -70,8 +70,10 @@ class ExcelExportPipeline:
             worksheet.cell(row=row_idx, column=7, value=adapter.get("target_group", ""))
             worksheet.cell(row=row_idx, column=8, value=adapter.get("target_group_normalized", ""))
             worksheet.cell(row=row_idx, column=9, value=adapter.get("status", ""))
-            worksheet.cell(row=row_idx, column=10, value=adapter.get("description", ""))
-            worksheet.cell(row=row_idx, column=11, value=adapter.get("event_url", ""))
+            worksheet.cell(row=row_idx, column=10, value=adapter.get("booking_info", "N/A"))
+            worksheet.cell(row=row_idx, column=11, value=adapter.get("description", ""))
+            worksheet.cell(row=row_idx, column=12, value=adapter.get("event_url", ""))
+            
             
             # Write Dynamic Columns (12 onwards)
             # We look up the value in 'extra_attributes'. If not found, write empty string.

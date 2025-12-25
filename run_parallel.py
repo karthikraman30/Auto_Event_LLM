@@ -14,12 +14,12 @@ import pandas as pd
 
 # URLs to scrape
 URLS = [
-    #"https://biblioteket.stockholm.se/evenemang",
+    "https://biblioteket.stockholm.se/evenemang",
     "https://www.skansen.se/en/calendar/",
-    #"https://biblioteket.stockholm.se/forskolor",
-    #"https://www.modernamuseet.se/stockholm/sv/kalender/",
-    #"https://armemuseum.se/kalender/",  # Enabled for debugging
-    #"https://www.tekniskamuseet.se/pa-gang/"
+    "https://biblioteket.stockholm.se/forskolor",
+    "https://www.modernamuseet.se/stockholm/sv/kalender/",
+    "https://armemuseum.se/kalender/",  # Enabled for debugging
+    "https://www.tekniskamuseet.se/pa-gang/"
 ]
 
 OUTPUT_DIR = "event_category/temp_outputs"
