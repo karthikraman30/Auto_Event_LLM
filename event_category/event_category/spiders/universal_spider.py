@@ -270,8 +270,8 @@ class MultiSiteEventSpider(scrapy.Spider):
         "https://biblioteket.stockholm.se/forskolor",
         "https://www.skansen.se/en/calendar/",
         "https://www.tekniskamuseet.se/pa-gang/",
-        # "https://armemuseum.se/kalender/",
-        # "https://www.modernamuseet.se/stockholm/sv/kalender/"
+        "https://armemuseum.se/kalender/",
+        "https://www.modernamuseet.se/stockholm/sv/kalender/"
     ]
 
     def configure_gemini(self):
@@ -699,6 +699,139 @@ class MultiSiteEventSpider(scrapy.Spider):
             
             return  # Exit after Tekniska handler
         
+        
+        # === MODERNA MUSEET HANDLER ===
+        if "modernamuseet.se" in response.url:
+            self.logger.info("Detected Moderna Museet. Using specialized DOM parser.")
+            
+            # Since content is SSR, we can parse page content directly
+            # We use Selector on the page content to allow using standard Scrapy selectors
+            content = await page.content()
+            sel = scrapy.Selector(text=content)
+            
+            # Locate all day containers
+            # Structure: .calendar__day[data-date="YYYY-MM-DD"]
+            days = sel.css('.calendar__day')
+            self.logger.info(f"Found {len(days)} day blocks.")
+            
+            extracted_count = 0
+            current_count = 0
+            
+            today = datetime.now().date()
+            # [MODIFIED] Look ahead 45 days (approx 1.5 months) 
+            limit_date = today + timedelta(days=45)
+            
+            for day in days:
+                date_str = day.attrib.get('data-date')
+                if not date_str:
+                    continue
+                
+                try:
+                    event_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                except ValueError:
+                    self.logger.warning(f"Invalid date format: {date_str}")
+                    continue
+                
+                # Filter past events or too far future
+                if event_date < today:
+                    continue
+                if event_date > limit_date:
+                    self.logger.info(f"Date {date_str} exceeds limit {limit_date}. Stopping extraction.")
+                    break # Assuming chronological order
+                
+                # Extract events within this day
+                events = day.css('article.calendar__item')
+                
+                for event in events:
+                    try:
+                        # 1. Title
+                        title = event.css('.calendar__item-title::text').get()
+                        if not title:
+                            continue
+                        title = title.strip()
+                        
+                        # 2. Link
+                        # Try to find specific link in "Läs mer" or shared links
+                        # Often in .calendar__item-share a.read-more
+                        event_url = event.css('.calendar__item-share a.read-more::attr(href)').get()
+                        
+                        if not event_url:
+                            # Fallback: check if title is inside valid link (unlikely here)
+                            # Or check if there is any other link
+                            event_url = response.url # Default to calendar page if no specific link
+                        else:
+                            event_url = response.urljoin(event_url)
+                            
+                        # 3. Time
+                        # <ul class="calendar__item-category"> <li><time>10.30</time></li> ...
+                        time_val = event.css('.calendar__item-category time::text').get()
+                        if not time_val:
+                            time_val = 'N/A'
+                        else:
+                            time_val = extract_time_only(time_val)
+                            
+                        # 4. Description
+                        # .calendar__item-extended-content p
+                        description = event.css('.calendar__item-extended-content p::text').get()
+                        if not description:
+                            description = 'N/A'
+                        else:
+                            description = description.strip()
+                            
+                        # 5. Location
+                        # .calendar__item-share li containing svg location -> a::text
+                        # This is tricky with CSS, let's look for link after location icon
+                        # We can try to get all text in .calendar__item-share li that does NOT have class "read-more"
+                        # Or iterate li's
+                        location = "Moderna Museet"
+                        share_items = event.css('.calendar__item-share li')
+                        for li in share_items:
+                            if li.css('svg use[xlink\:href*="#location"]'):
+                                loc_text = li.css('a::text').get()
+                                if loc_text:
+                                    location = loc_text.strip()
+                                    break
+                        
+                        # 6. Target Group
+                        # .calendar__item-category li (text that is not time)
+                        tags = []
+                        cat_items = event.css('.calendar__item-category li')
+                        for li in cat_items:
+                            if not li.css('time'):
+                                t_text = li.css('::text').get()
+                                if t_text:
+                                    tags.append(t_text.strip())
+                        
+                        target_group = ", ".join(tags) if tags else "All"
+                        target_group_normalized = self.simple_normalize(target_group)
+                        
+                        # Create Item
+                        item = EventCategoryItem()
+                        item['event_name'] = title
+                        item['event_url'] = event_url
+                        item['date_iso'] = date_str
+                        item['date'] = date_str
+                        item['end_date_iso'] = 'N/A' # Single day usually
+                        item['time'] = time_val
+                        item['location'] = location
+                        item['description'] = description
+                        item['target_group'] = target_group
+                        item['target_group_normalized'] = target_group_normalized
+                        item['status'] = detect_cancelled_status(title, description)
+                        item['booking_info'] = 'N/A' # Specific booking info parsing logic could be added if needed
+                        
+                        self.logger.info(f"  -> {title}: {date_str} | {time_val}")
+                        yield item
+                        extracted_count += 1
+                        
+                    except Exception as e:
+                        self.logger.error(f"Error parsing Moderna event: {e}")
+                        continue
+
+            self.logger.info(f"Moderna Museet: Extracted {extracted_count} events.")
+            await page.close()
+            return
+
         # === STEP B: SCROLL & LOAD MORE ===
         for _ in range(4): 
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")

@@ -1,0 +1,279 @@
+<body class="color-theme-variant-primary">
+        <div id="smooth-wrapper">
+            <div id="smooth-content">
+                <a href="#content" class="u-visually-hidden u-focusable c-skip-link">Gå till innehåll</a>
+                <noscript><iframe src="https://www.googletagmanager.com/ns.html?id=GTM-NMJDKS" height="0" width="0" title="" style="display:none;visibility:hidden"></iframe></noscript>
+
+                <div class="o-focus-trap is-header is-visible" data-focus-trap data-page-header>
+    <div class="c-backdrop color-theme-djurgarden-default" data-dialog-backdrop></div>
+    <div class="o-focus-trap__content" data-page-header-content>
+        <div class="o-focus-trap__inner">
+            <header class="o-header c-header color-theme-djurgarden-default" data-header-height>
+                <div class="o-header__left">
+                    <a class="c-header__tickets" href="https://biljetter.nordiskamuseet.se/" data-measure-btn-header data-analytics="btn-header">Biljetter</a>
+                                            <a class="c-header__opening-hours -link u-hidden@xsmall-xlarge" href="https://www.nordiskamuseet.se/besok-oss/oppettider/">
+                            Öppet idag 10–17
+                            
+<div class="c-cta-arrow -xsmall" aria-hidden="true">
+    <svg class="c-cta-arrow__icon">
+    <use xlink:href="https://www.nordiskamuseet.se/wp-content/themes/bz-app-theme/assets/images/spritemap-783dc871f151b192741f.svg#icon-arrow-right"></use>
+</svg>
+    <svg class="c-cta-arrow__icon -hover">
+    <use xlink:href="https://www.nordiskamuseet.se/wp-content/themes/bz-app-theme/assets/images/spritemap-783dc871f151b192741f.svg#icon-arrow-right"></use>
+</svg>
+</div>
+                        </a>
+                                    </div>
+                
+<a class="o-header__center c-header-logo" data-header-logo href="https://www.nordiskamuseet.se/" aria-label="Nordiska Museet">
+
+                <svg class="c-header-logo__image -default" aria-hidden="true" focusable="false">
+                <use xlink:href="https://www.nordiskamuseet.se/wp-content/themes/bz-app-theme/assets/images/spritemap-783dc871f151b192741f.svg#logo-icon" class="u-hidden@xsmall-xlarge"></use>
+                <use xlink:href="https://www.nordiskamuseet.se/wp-content/themes/bz-app-theme/assets/images/spritemap-783dc871f151b192741f.svg#logo" class="u-hidden@xlarge"></use>
+            </svg>
+    
+</a>
+
+                <nav class="o-header__right" aria-label="Meny">
+                    <ul class="c-header__menu">
+                        <li class="c-header__menu__item u-hidden@xsmall-large">
+                            
+    <div class="c-language-menu">
+        <button type="button" class="c-language-menu__button" data-a11y-toggle="language-menu-1359241675" aria-label="Välj språk">
+            <svg class="c-language-menu__button__icon-globe" aria-hidden="true" focusable="false">
+    <use xlink:href="https://www.nordiskamuseet.se/wp-content/themes/bz-app-theme/assets/images/spritemap-783dc871f151b192741f.svg#icon-globe"></use>
+</svg>
+            <svg class="c-language-menu__button__icon-arrow-down" aria-hidden="true" focusable="false">
+    <use xlink:href="https://www.nordiskamuseet.se/wp-content/themes/bz-app-theme/assets/images/spritemap-783dc871f151b192741f.svg#icon-arrow-down-alt"></use>
+</svg>
+        </button>
+        <ul id="language-menu-1359241675" class="c-language-menu__items">
+                            <li class="c-language-menu__items__item">
+                                            <a class="c-language-menu__link" lang="sv-SE" aria-current="page" href="https://www.nordiskamuseet.se/">Svenska</a>
+                                    </li>
+                            <li class="c-language-menu__items__item">
+                                            <a class="c-language-menu__link" lang="en-GB" href="https://www.nordiskamuseet.se/en/">English</a>
+                                    </li>
+                    </ul>
+    </div>
+                        </li>
+                        <li class="c-header__menu__item">
+                            <button class="c-search-button" aria-label="Sök" type="button" data-modal-toggle="search-modal" aria-expanded="false">
+    <svg xmlns="http://www.w3.org/2000/svg" width="44" height="34" viewbox="0 0 44 34" class="c-search-button__icon" aria-hidden="true" focusable="false">
+        <rect class="c-search-button__icon__line" x="0" y="15" width="100%" height="3"></rect>
+        <rect class="c-search-button__icon__handle" x="55%" y="37" width="31%" height="3" transform="rotate(45)"></rect>
+        <circle class="c-search-button__icon__circle" cx="20" cy="14" r="12" stroke-width="3"></circle>
+    </svg>
+</button>
+                        </li>
+                        <li class="c-header__menu__item">
+                            <button class="c-menu-button" aria-label="Meny" type="button" data-modal-toggle="menu-modal" data-main-menu-button data-analytics="main-menu" aria-expanded="false">
+    <svg xmlns="http://www.w3.org/2000/svg" width="44" height="34" viewbox="0 0 44 34" class="c-menu-button__icon" aria-hidden="true" focusable="false">
+        <rect class="c-menu-button__icon__line-1" data-dialog-button-animation="line-1" x="0" y="0" width="100%" height="3"></rect>
+        <rect class="c-menu-button__icon__line-2" data-dialog-button-animation="line-2" x="0" y="15" width="100%" height="3"></rect>
+        <rect class="c-menu-button__icon__line-3" data-dialog-button-animation="line-3" x="0" y="30" width="100%" height="3"></rect>
+    </svg>
+</button>
+                        </li>
+                    </ul>
+                </nav>
+            </header>
+            <div id="search-modal" aria-labelledby="search-modal-title" aria-hidden="true" class="o-modal c-search-modal color-theme-djurgarden-default" data-dialog-container data-dialog-state-class="has-modal-search" aria-modal="true" role="dialog">
+    <div class="o-modal__content c-search-modal__content" data-dialog-content role="document">
+        <div class="o-modal__content__inner">
+            <div role="heading" aria-level="1" id="search-modal-title" class="u-visually-hidden">Sök</div>
+            <form class="c-search-modal__form" action="https://www.nordiskamuseet.se/" method="GET">
+                <div class="c-search-modal__components">
+                    <label for="search-input" class="u-visually-hidden">Sök</label>
+                    <input class="c-search-modal__field" type="search" id="search-input" name="s" placeholder="Sök" required data-search-field>
+                    <button class="c-search-modal__button" type="submit" aria-label="Sök">
+                        <svg class="c-search-modal__button__icon">
+    <use xlink:href="https://www.nordiskamuseet.se/wp-content/themes/bz-app-theme/assets/images/spritemap-783dc871f151b192741f.svg#icon-search"></use>
+</svg>
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+            <div id="menu-modal" aria-labelledby="menu-modal-title" aria-hidden="true" class="o-modal c-menu-modal color-theme-djurgarden-default" data-dialog-container data-dialog-state-class="has-modal-menu" data-analytics="menu" tabindex="-1" aria-modal="true" role="dialog">
+    <div class="o-modal__content c-menu-modal__content" data-body-scroll-lock-ignore data-dialog-content role="document">
+        <div class="o-modal__content__inner">
+            <div role="heading" aria-level="1" id="menu-modal-title" class="u-visually-hidden">Meny</div>
+
+                            <a class="c-menu-modal__opening-hours u-hidden@xlarge" href="https://www.nordiskamuseet.se/besok-oss/oppettider/">Öppet idag 10–17</a>
+            
+                            <nav class="c-primary-menu" aria-label="Primär meny">
+    <ul class="c-primary-menu__items">
+        
+                            <li class="c-primary-menu__items__item">
+                    <span class="c-primary-menu__items__item__wrapper">
+
+                        <a class="c-primary-menu__link" href="https://www.nordiskamuseet.se/besok-oss/">Besök oss</a>
+
+                        <button type="button" class="c-primary-menu__button" aria-label="Undermeny för Besök oss" data-a11y-toggle="primary-submenu-1" aria-expanded="false" data-analytics="primary-menu-submenu">
+                            <span class="c-primary-menu__button__inner">
+                                <svg class="c-primary-menu__button__icon" aria-hidden="true" focusable="false">
+    <use xlink:href="https://www.nordiskamuseet.se/wp-content/themes/bz-app-theme/assets/images/spritemap-783dc871f151b192741f.svg#icon-arrow-down"></use>
+</svg>
+                                <svg class="c-primary-menu__button__icon -hover" aria-hidden="true" focusable="false">
+    <use xlink:href="https://www.nordiskamuseet.se/wp-content/themes/bz-app-theme/assets/images/spritemap-783dc871f151b192741f.svg#icon-arrow-down"></use>
+</svg>
+                            </span>
+                        </button>
+
+                    </span>
+                    <ul class="c-primary-submenu__items" id="primary-submenu-1">
+                                                    <li class="c-primary-submenu__items__item">
+                                <a class="c-primary-submenu__link" href="https://www.nordiskamuseet.se/besok-oss/oppettider/">Öppettider</a>
+                            </li>
+                                                    <li class="c-primary-submenu__items__item">
+                                <a class="c-primary-submenu__link" href="https://www.nordiskamuseet.se/besok-oss/entre-biljetter/">Entré och biljetter</a>
+                            </li>
+                                                    <li class="c-primary-submenu__items__item">
+                                <a class="c-primary-submenu__link" href="https://www.nordiskamuseet.se/besok-oss/mat-och-dryck/">Restaurang och kafé</a>
+                            </li>
+                                                    <li class="c-primary-submenu__items__item">
+                                <a class="c-primary-submenu__link" href="https://www.nordiskamuseet.se/besok-oss/barn-familj/">Barn och familj</a>
+                            </li>
+                                                    <li class="c-primary-submenu__items__item">
+                                <a class="c-primary-submenu__link" href="https://www.nordiskamuseet.se/besok-oss/skola/">Skola</a>
+                            </li>
+                                                    <li class="c-primary-submenu__items__item">
+                                <a class="c-primary-submenu__link" href="https://www.nordiskamuseet.se/besok-oss/gruppbesok/">Gruppbesök</a>
+                            </li>
+                                                    <li class="c-primary-submenu__items__item">
+                                <a class="c-primary-submenu__link" href="https://www.nordiskamuseet.se/besok-oss/boka-guidad-visning-i-nordbor/">Boka visning</a>
+                            </li>
+                                                    <li class="c-primary-submenu__items__item">
+                                <a class="c-primary-submenu__link" href="https://www.nordiskamuseet.se/besok-oss/moten-och-event/">Möten och event</a>
+                            </li>
+                                                    <li class="c-primary-submenu__items__item">
+                                <a class="c-primary-submenu__link" href="https://www.nordiskamuseet.se/besok-oss/museibutiken/">Museibutiken</a>
+                            </li>
+                                                    <li class="c-primary-submenu__items__item">
+                                <a class="c-primary-submenu__link" href="https://www.nordiskamuseet.se/besok-oss/arkiv-bibliotek/">Arkiv och bibliotek</a>
+                            </li>
+                                            </ul>
+                </li>
+            
+        
+                            <li class="c-primary-menu__items__item">
+                    <a class="c-primary-menu__link" href="https://www.nordiskamuseet.se/utstallningar/">Utställningar</a>
+                </li>
+            
+        
+                            <li class="c-primary-menu__items__item">
+                    <a class="c-primary-menu__link" href="https://www.nordiskamuseet.se/evenemang/">Evenemang</a>
+                </li>
+            
+        
+                            <li class="c-primary-menu__items__item">
+                    <span class="c-primary-menu__items__item__wrapper">
+
+                        <a class="c-primary-menu__link" href="https://www.nordiskamuseet.se/utforska/">Utforska</a>
+
+                        <button type="button" class="c-primary-menu__button" aria-label="Undermeny för Utforska" data-a11y-toggle="primary-submenu-4" aria-expanded="false" data-analytics="primary-menu-submenu">
+                            <span class="c-primary-menu__button__inner">
+                                <svg class="c-primary-menu__button__icon" aria-hidden="true" focusable="false">
+    <use xlink:href="https://www.nordiskamuseet.se/wp-content/themes/bz-app-theme/assets/images/spritemap-783dc871f151b192741f.svg#icon-arrow-down"></use>
+</svg>
+                                <svg class="c-primary-menu__button__icon -hover" aria-hidden="true" focusable="false">
+    <use xlink:href="https://www.nordiskamuseet.se/wp-content/themes/bz-app-theme/assets/images/spritemap-783dc871f151b192741f.svg#icon-arrow-down"></use>
+</svg>
+                            </span>
+                        </button>
+
+                    </span>
+                    <ul class="c-primary-submenu__items" id="primary-submenu-4">
+                                                    <li class="c-primary-submenu__items__item">
+                                <a class="c-primary-submenu__link" href="https://www.nordiskamuseet.se/utforska/livet-i-norden/">Livet i Norden</a>
+                            </li>
+                                                    <li class="c-primary-submenu__items__item">
+                                <a class="c-primary-submenu__link" href="https://www.nordiskamuseet.se/utforska/samlingar/">Samlingar</a>
+                            </li>
+                                                    <li class="c-primary-submenu__items__item">
+                                <a class="c-primary-submenu__link" href="https://www.nordiskamuseet.se/om-museet/nordiska-museets-historia/">Museets historia</a>
+                            </li>
+                                                    <li class="c-primary-submenu__items__item">
+                                <a class="c-primary-submenu__link" href="https://www.nordiskamuseet.se/utforska/hogtider/">Högtider</a>
+                            </li>
+                                                    <li class="c-primary-submenu__items__item">
+                                <a class="c-primary-submenu__link" href="https://www.nordiskamuseet.se/utforska/insamling/">Insamling</a>
+                            </li>
+                                                    <li class="c-primary-submenu__items__item">
+                                <a class="c-primary-submenu__link" href="https://www.nordiskamuseet.se/besok-oss/arkiv-bibliotek/">Arkiv och bibliotek</a>
+                            </li>
+                                                    <li class="c-primary-submenu__items__item">
+                                <a class="c-primary-submenu__link" href="https://www.nordiskamuseet.se/om-museet/forskning/">Forskning</a>
+                            </li>
+                                            </ul>
+                </li>
+            
+            </ul>
+</nav>
+            
+                            <nav class="c-secondary-menu" aria-label="Sekundär meny">
+    <ul class="c-secondary-menu__items">
+                    <li class="c-secondary-menu__items__item">
+                <a class="c-secondary-menu__link" href="https://www.nordiskamuseet.se/besok-oss/skola/">Skola</a>
+            </li>
+                    <li class="c-secondary-menu__items__item">
+                <a class="c-secondary-menu__link" href="https://webbshop.nordiskamuseet.se/">Webbshop</a>
+            </li>
+                    <li class="c-secondary-menu__items__item">
+                <a class="c-secondary-menu__link" href="https://www.nordiskamuseet.se/om-museet/">Om museet</a>
+            </li>
+            </ul>
+</nav>
+            
+            <div class="u-hidden@large">
+                
+    <div class="c-language-menu">
+        <button type="button" class="c-language-menu__button" data-a11y-toggle="language-menu-527435336" aria-label="Välj språk">
+            <svg class="c-language-menu__button__icon-globe" aria-hidden="true" focusable="false">
+    <use xlink:href="https://www.nordiskamuseet.se/wp-content/themes/bz-app-theme/assets/images/spritemap-783dc871f151b192741f.svg#icon-globe"></use>
+</svg>
+            <svg class="c-language-menu__button__icon-arrow-down" aria-hidden="true" focusable="false">
+    <use xlink:href="https://www.nordiskamuseet.se/wp-content/themes/bz-app-theme/assets/images/spritemap-783dc871f151b192741f.svg#icon-arrow-down-alt"></use>
+</svg>
+        </button>
+        <ul id="language-menu-527435336" class="c-language-menu__items">
+                            <li class="c-language-menu__items__item">
+                                            <a class="c-language-menu__link" lang="sv-SE" aria-current="page" href="https://www.nordiskamuseet.se/">Svenska</a>
+                                    </li>
+                            <li class="c-language-menu__items__item">
+                                            <a class="c-language-menu__link" lang="en-GB" href="https://www.nordiskamuseet.se/en/">English</a>
+                                    </li>
+                    </ul>
+    </div>
+            </div>
+
+                            <nav class="c-modal-locations-menu" aria-label="Besöksmål">
+        <ul class="c-modal-locations-menu__items">
+                    <li class="c-modal-locations-menu__items__item menu-item menu-item-type-custom menu-item-object-custom">
+                <a class="c-modal-locations-menu__link" href="https://www.julitagard.se/">
+                    Julita gård
+                    <svg class="c-modal-locations-menu__link__icon" aria-hidden="true" focusable="false">
+                        <use xlink:href="https://www.nordiskamuseet.se/wp-content/themes/bz-app-theme/assets/images/spritemap-783dc871f151b192741f.svg#icon-external-link"></use>
+                    </svg>
+                </a>
+            </li>
+                    <li class="c-modal-locations-menu__items__item menu-item menu-item-type-custom menu-item-object-custom">
+                <a class="c-modal-locations-menu__link" href="https://www.tyresoslott.se/">
+                    Tyresö slott
+                    <svg class="c-modal-locations-menu__link__icon" aria-hidden="true" focusable="false">
+                        <use xlink:href="https://www.nordiskamuseet.se/wp-content/themes/bz-app-theme/assets/images/spritemap-783dc871f151b192741f.svg#icon-external-link"></use>
+                    </svg>
+                </a>
+            </li>
+                    <li class="c-modal-locations-menu__items__item menu-item menu-item-type-custom menu-item-object-custom">
+                <a class="c-modal-locations-menu__link" href="https://www.svindersviksommarnoje.se/">
+                    Svindersvik
+                    <svg class="c-modal-locations-menu__link__icon" aria-hidden="true" focusable="false">
+                        <use xlink:href="https://www.nordiskamuseet.se/wp-content/themes/bz-app-theme/assets/images/spritemap-783dc871f151b192741f.svg#icon-external-link"></use>
+                    </svg>
+                </a>
+            </li>
+                    <li class="c-modal-locations-menu__items__item menu-item menu-item-type-post_type me
+None

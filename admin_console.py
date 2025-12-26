@@ -138,54 +138,48 @@ with tabs[0]:
     # --- ACTIONS SECTION ---
     st.markdown("---")
     st.subheader("🎬 ACTIONS")
-    
     action_col1, action_col2, action_col3 = st.columns([1, 1, 3])
+    
+    if 'log_buffer' not in st.session_state:
+        st.session_state.log_buffer = ""
     
     with action_col1:
         if st.button("🚀 Scrape Now", use_container_width=True):
-            with st.spinner("Scraping all venues in parallel... This may take a few minutes."):
-                try:
-                    import subprocess
-                    # Run run_parallel.py as a separate process for proper parallel execution
-                    result = subprocess.run(
-                        [VENV_PYTHON, "run_parallel.py"],
-                        cwd=os.getcwd(),
-                        capture_output=True,
-                        text=True,
-                        timeout=1800  # 30 minute timeout
-                    )
-                    
-                    # Parse the result from stdout
-                    output = result.stdout
-                    if "Scraping complete:" in output:
-                        # Extract events count from output
-                        import re
-                        match = re.search(r'Scraping complete: (\d+) events, (\d+) failures', output)
-                        if match:
-                            events_count = int(match.group(1))
-                            failures = int(match.group(2))
-                        else:
-                            events_count = 0
-                            failures = 0
-                        
+            st.session_state.log_buffer = "Starting parallel scrape...\n"
+            with st.spinner("Scraping all venues... check the Logs tab for progress."):
+                import subprocess
+                import sys
+                
+                # Use sys.executable to ensure we use the same environment
+                process = subprocess.Popen(
+                    [VENV_PYTHON, "run_parallel.py"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    universal_newlines=True,
+                    cwd=os.getcwd()
+                )
+                
+                # Capture output in real-time
+                for line in process.stdout:
+                    st.session_state.log_buffer += line
+                
+                process.wait()
+                
+                if process.returncode == 0:
+                    # Parse results from log buffer
+                    match = re.search(r'Scraping complete: (\d+) events, (\d+) failures', st.session_state.log_buffer)
+                    if match:
+                        events_count = int(match.group(1))
+                        failures = int(match.group(2))
                         status = "Warn" if failures > 0 else "OK"
-                        warnings = [line for line in output.split('\n') if 'Error' in line or 'Warning' in line]
-                        db.add_log("Manual", status, events_count, failures, warnings if warnings else None)
-                        st.success(f"✅ Scraped {events_count} events from all venues!")
-                    else:
-                        st.warning(f"Scraping completed but couldn't parse results. Check logs.")
-                        db.add_log("Manual", "Warn", 0, 0, ["Could not parse scraping results"])
-                    
-                    if result.stderr:
-                        st.expander("Debug Info").write(result.stderr[-1000:])
-                        
-                except subprocess.TimeoutExpired:
-                    db.add_log("Manual", "Error", 0, 1, ["Scraping timed out after 30 minutes"])
-                    st.error("❌ Scraping timed out after 30 minutes")
-                except Exception as e:
-                    db.add_log("Manual", "Error", 0, 1, [str(e)])
-                    st.error(f"❌ Error: {e}")
-                st.rerun()
+                        db.add_log("Manual", status, events_count, failures, None)
+                    st.success("✅ Scrape completed successfully!")
+                    st.rerun()  # Refresh to show new counts in metrics
+                else:
+                    db.add_log("Manual", "Error", 0, 1, ["Scraping failed"])
+                    st.error("❌ Scraping failed. See Logs tab for details.")
     
     with action_col2:
         events = db.get_all_events()
@@ -308,17 +302,59 @@ with tabs[1]:
     st.markdown("---")
     st.subheader("🏛️ ACTIVE VENUES")
     
+    # Add New Venue
+    with st.expander("➕ Add New Venue", expanded=False):
+        with st.form("add_venue_form"):
+            new_venue_name = st.text_input("Venue Name", placeholder="e.g. My New Venue")
+            new_venue_url = st.text_input("Venue URL", placeholder="https://example.com/events")
+            submitted = st.form_submit_button("Add Venue")
+            
+            if submitted:
+                if new_venue_name and new_venue_url:
+                    if db.add_scraping_url(new_venue_url, new_venue_name):
+                        st.success(f"Added {new_venue_name}!")
+                        st.rerun()
+                    else:
+                        st.error("Failed to add venue. URL might already exist.")
+                else:
+                    st.warning("Please provide both name and URL.")
+
+    # List Venues
     scraping_urls = db.get_scraping_urls()
-    venue_changes = {}
     
-    for url_data in scraping_urls:
-        enabled = st.checkbox(url_data["name"], value=url_data["enabled"], key=f"venue_{url_data['id']}")
-        venue_changes[url_data["id"]] = enabled
-    
-    if st.button("💾 Save Venues"):
-        for url_id, enabled in venue_changes.items():
-            db.toggle_url(url_id, enabled)
-        st.success("Venues saved!")
+    if scraping_urls:
+        st.write("##### Configured Venues")
+        
+        # Header
+        col1, col2, col3, col4 = st.columns([0.5, 2, 3, 0.5])
+        col1.markdown("**Run**")
+        col2.markdown("**Name**")
+        col3.markdown("**URL**")
+        col4.markdown("**Del**")
+        
+        for url_data in scraping_urls:
+            c1, c2, c3, c4 = st.columns([0.5, 2, 3, 0.5])
+            
+            # Enable/Disable Checkbox
+            is_enabled = c1.checkbox("Enable", value=url_data["enabled"], key=f"enable_{url_data['id']}", label_visibility="collapsed")
+            
+            # Name
+            c2.write(url_data["name"])
+            
+            # URL (clickable link)
+            c3.markdown(f"[{url_data['url']}]({url_data['url']})")
+            
+            # Delete Button
+            if c4.button("🗑️", key=f"del_{url_data['id']}", help="Delete this venue"):
+                db.delete_scraping_url(url_data["id"])
+                st.rerun()
+            
+            # Auto-save toggle changes
+            if is_enabled != url_data["enabled"]:
+                db.toggle_url(url_data["id"], is_enabled)
+                st.rerun()
+    else:
+        st.info("No venues configured. Add one above!")
     
     # --- EVENT FILTERING ---
     st.markdown("---")
