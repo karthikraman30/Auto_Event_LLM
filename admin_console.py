@@ -13,9 +13,40 @@ sys.path.append(os.path.join(os.getcwd(), "event_category"))
 from event_category.utils.db_manager import DatabaseManager
 
 # --- PYTHON PATH (use venv Python for subprocess) ---
-VENV_PYTHON = os.path.join(os.getcwd(), "venv", "bin", "python")
+# --- PYTHON PATH (use venv Python for subprocess) ---
+# Check if running on Streamlit Cloud (headless) or locally
+if os.path.exists(os.path.join(os.getcwd(), "venv")):
+    VENV_PYTHON = os.path.join(os.getcwd(), "venv", "bin", "python")
+else:
+    # On Streamlit Cloud, use the same python that launched the app
+    VENV_PYTHON = sys.executable
+
 if not os.path.exists(VENV_PYTHON):
     VENV_PYTHON = sys.executable  # Fallback
+
+def get_subprocess_env():
+    """
+    Create environment dict for subprocess, injecting secrets from Streamlit
+    if available, otherwise using system environment.
+    """
+    env = os.environ.copy()
+    
+    # Inject secrets from st.secrets if available (Streamlit Cloud)
+    # We check for specific keys we know the scraper needs
+    sensitive_keys = ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GROQ_API_KEY"]
+    
+    try:
+        if hasattr(st, "secrets"):
+            for key in sensitive_keys:
+                if key in st.secrets:
+                    env[key] = st.secrets[key]
+                # Also check inside "general" or "env" sections if people organize secrets that way
+                elif "env" in st.secrets and key in st.secrets["env"]:
+                    env[key] = st.secrets["env"][key]
+    except Exception as e:
+        print(f"Warning: Could not access Streamlit secrets: {e}")
+        
+    return env
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Event Scraper Admin", layout="wide", page_icon="🎭")
@@ -29,12 +60,14 @@ def run_scheduled_scrape():
     import subprocess
     import re
     try:
+        env = get_subprocess_env()
         result = subprocess.run(
             [VENV_PYTHON, "run_parallel.py"],
             cwd=os.getcwd(),
             capture_output=True,
             text=True,
-            timeout=1800
+            timeout=1800,
+            env=env
         )
         
         output = result.stdout
@@ -150,6 +183,7 @@ with tabs[0]:
                 import subprocess
                 import sys
                 
+                env = get_subprocess_env()
                 # Use sys.executable to ensure we use the same environment
                 process = subprocess.Popen(
                     [VENV_PYTHON, "run_parallel.py"],
@@ -158,7 +192,8 @@ with tabs[0]:
                     text=True,
                     bufsize=1,
                     universal_newlines=True,
-                    cwd=os.getcwd()
+                    cwd=os.getcwd(),
+                    env=env
                 )
                 
                 # Capture output in real-time
