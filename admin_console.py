@@ -110,6 +110,27 @@ def setup_scheduler():
     scheduler.start()
     return scheduler
 
+@st.cache_resource
+def install_playwright_browsers():
+    """
+    Install Playwright browsers (Chromium) on first run.
+    Uses @st.cache_resource to ensure it only runs once per session/deploy.
+    """
+    print("Checking/Installing Playwright browsers...")
+    try:
+        # Check if browser is installed by trying to get the path
+        # If this fails or returns empty, we might need to install
+        import subprocess
+        
+        # Only install chromium to save time/space
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+        print("Playwright installation complete.")
+    except Exception as e:
+        print(f"Error installing Playwright: {e}")
+
+# Run installation on startup
+install_playwright_browsers()
+
 if 'scheduler' not in st.session_state:
     st.session_state.scheduler = setup_scheduler()
 
