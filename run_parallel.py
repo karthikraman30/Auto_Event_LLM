@@ -10,8 +10,17 @@ import pandas as pd
 sys.path.append(os.path.join(os.getcwd(), "event_category"))
 from event_category.utils.db_manager import DatabaseManager
 
-def run_spider(url, index):
-    """Run spider for a single URL and return result info."""
+# CRITICAL: Capture environment at module load time, BEFORE ProcessPoolExecutor spawns workers
+# ProcessPoolExecutor creates NEW processes that don't inherit env vars set after fork
+PARENT_ENV = os.environ.copy()
+
+def run_spider(args):
+    """Run spider for a single URL and return result info.
+    
+    Args is a tuple of (url, index, env_dict) to work with ProcessPoolExecutor.
+    """
+    url, index, env_dict = args
+    
     # Use absolute paths for production compatibility (Streamlit Cloud)
     base_dir = os.path.dirname(os.path.abspath(__file__))
     event_category_dir = os.path.join(base_dir, "event_category")
@@ -20,14 +29,19 @@ def run_spider(url, index):
     
     cmd = [sys.executable, "-m", "scrapy", "crawl", "universal_events", "-a", f"url={url}", "-O", output_filename]
     
+    # Debug logging for production
+    print(f"[DEBUG] run_spider: Processing {url}")
+    print(f"[DEBUG] run_spider: GEMINI_API_KEY present in env: {'GEMINI_API_KEY' in env_dict}")
+    print(f"[DEBUG] run_spider: cwd={event_category_dir}")
+    
     try:
-        # CRITICAL: Pass environment variables for API keys (GEMINI_API_KEY etc.)
+        # CRITICAL: Use the environment passed from main(), not os.environ
         result = subprocess.run(
             cmd, 
             cwd=event_category_dir, 
             check=True, 
             timeout=1800,
-            env=os.environ.copy(),  # Pass all env vars including injected secrets
+            env=env_dict,  # Use explicitly passed environment
             capture_output=True,
             text=True
         )
@@ -66,6 +80,10 @@ def main():
     Run parallel scraping for all enabled URLs.
     Returns dict with: events (count), failures (count), warnings (list of error messages)
     """
+    # Debug: Log environment status
+    print(f"[DEBUG] main: GEMINI_API_KEY in PARENT_ENV: {'GEMINI_API_KEY' in PARENT_ENV}")
+    print(f"[DEBUG] main: GEMINI_API_KEY in os.environ: {'GEMINI_API_KEY' in os.environ}")
+    
     db = DatabaseManager()
     
     # Get enabled URLs from database
@@ -74,6 +92,8 @@ def main():
     if not urls:
         print("No enabled URLs to scrape.")
         return {"events": 0, "failures": 0, "warnings": ["No enabled URLs configured"]}
+    
+    print(f"[DEBUG] main: Found {len(urls)} URLs to scrape")
     
     # Use absolute path for temp_outputs directory
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -84,8 +104,12 @@ def main():
     failures = 0
     warnings = []
     
+    # Pass environment explicitly to each worker
     with ProcessPoolExecutor(max_workers=2) as executor:
-        futures = {executor.submit(run_spider, url, i): url for i, url in enumerate(urls)}
+        # Create args tuples with (url, index, env_dict)
+        args_list = [(url, i, PARENT_ENV) for i, url in enumerate(urls)]
+        futures = {executor.submit(run_spider, args): args[0] for args in args_list}
+        
         for future in as_completed(futures):
             result = future.result()
             results.append(result)
