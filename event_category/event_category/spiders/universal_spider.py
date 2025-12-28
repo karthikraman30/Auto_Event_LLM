@@ -503,6 +503,37 @@ class MultiSiteEventSpider(scrapy.Spider):
                     self.logger.warning(f"Error navigating to next day: {e}")
                     break
             
+            # [NEW] AI FALLBACK: If no events extracted, try AI
+            if len(event_buffer) == 0:
+                self.logger.warning("Skansen: No events extracted with selectors. Trying AI fallback...")
+                try:
+                    page_text = await page.inner_text("body")
+                    page_text = re.sub(r'\s+', ' ', page_text).strip()[:8000]  # Limit text size
+                    ai_result = self.call_ai_engine(page_text, include_selectors=False)
+                    if ai_result:
+                        events_list = ai_result if isinstance(ai_result, list) else ai_result.get('events', [])
+                        for event_data in events_list:
+                            item = EventCategoryItem()
+                            item['event_name'] = event_data.get('event_name', 'Unknown')
+                            item['event_url'] = response.url
+                            item['date_iso'] = event_data.get('date_iso', '')
+                            item['date'] = event_data.get('date_iso', '')
+                            item['end_date_iso'] = event_data.get('end_date_iso', 'N/A')
+                            item['time'] = event_data.get('time', 'N/A')
+                            item['description'] = event_data.get('description', 'N/A')
+                            item['location'] = event_data.get('location', 'Skansen')
+                            item['target_group'] = event_data.get('target_group', 'All')
+                            item['target_group_normalized'] = self.simple_normalize(event_data.get('target_group', 'All'))
+                            item['status'] = event_data.get('status', 'scheduled')
+                            item['booking_info'] = 'N/A'
+                            self.logger.info(f"  [AI] -> {item['event_name']}: {item['date_iso']}")
+                            yield item
+                        self.logger.info(f"Skansen AI fallback extracted {len(events_list)} events.")
+                except Exception as e:
+                    self.logger.error(f"Skansen AI fallback failed: {e}")
+                await page.close()
+                return
+            
             # [NEW] CONSOLIDATION: Yield unique events with start/end dates
             self.logger.info(f"Consolidating {len(event_buffer)} unique Skansen events...")
             
@@ -539,6 +570,23 @@ class MultiSiteEventSpider(scrapy.Spider):
         if "tekniskamuseet.se" in response.url:
             self.logger.info("Detected Tekniska museet. Using Cloudscraper for Cloudflare bypass.")
             
+            # [NEW] Get selectors from database
+            tekniska_selectors = self.db.get_selectors(response.url)
+            if tekniska_selectors:
+                self.logger.info(f"Using DB selectors for Tekniska: {tekniska_selectors.get('container')}")
+                sel = tekniska_selectors.get('items', {})
+            else:
+                self.logger.info("No DB selectors for Tekniska. Using fallback hardcoded selectors.")
+                sel = {
+                    'event_name': '.archive-item-link h3 span',
+                    'event_url': '.archive-item-link',
+                    'date_iso': '.archive-item-date span',
+                    'target_group_age': '.event-archive-item-age span',
+                    'target_group_type': '.event-archive-item-type span',
+                    'target_group_tags': '.archive-item-tags li span'
+                }
+            container_sel = tekniska_selectors.get('container', '.event-archive-item-inner') if tekniska_selectors else '.event-archive-item-inner'
+            
             # Close the Playwright page - we'll use cloudscraper instead
             if page:
                 await page.close()
@@ -559,9 +607,9 @@ class MultiSiteEventSpider(scrapy.Spider):
                 self.logger.error(f"Cloudscraper error: {e}")
                 return
             
-            # Parse with BeautifulSoup
+            # Parse with BeautifulSoup using selectors from DB
             soup = BeautifulSoup(html, 'html.parser')
-            events = soup.select('.event-archive-item-inner')
+            events = soup.select(container_sel)
             self.logger.info(f"Found {len(events)} Tekniska museet event cards")
             
             today = datetime.now().date()
@@ -569,21 +617,21 @@ class MultiSiteEventSpider(scrapy.Spider):
             
             for event in events:
                 try:
-                    # Title
-                    title_el = event.select_one('.archive-item-link h3 span')
+                    # Title - use selector from DB
+                    title_el = event.select_one(sel.get('event_name', '.archive-item-link h3 span'))
                     if not title_el:
                         continue
                     event_name = title_el.get_text(strip=True)
                     
-                    # URL
-                    link_el = event.select_one('.archive-item-link')
+                    # URL - use selector from DB
+                    link_el = event.select_one(sel.get('event_url', '.archive-item-link'))
                     if link_el and link_el.get('href'):
                         event_url = response.urljoin(link_el['href'])
                     else:
                         event_url = response.url
                     
-                    # Date - parse range format like "2025-12-20 - 2026-01-06"
-                    date_el = event.select_one('.archive-item-date span')
+                    # Date - use selector from DB
+                    date_el = event.select_one(sel.get('date_iso', '.archive-item-date span'))
                     date_iso = None
                     end_date_iso = None
                     
@@ -623,19 +671,18 @@ class MultiSiteEventSpider(scrapy.Spider):
                     except ValueError:
                         continue
                     
-                    # === TARGET GROUP EXTRACTION FROM CARD LABELS ===
+                    # === TARGET GROUP EXTRACTION FROM CARD LABELS (using DB selectors) ===
                     target_parts = []
                     
-                    # 1. Age range label (e.g., "12-15", "8+", "15-19")
-                    age_el = event.select_one('.event-archive-item-age span')
+                    # 1. Age range label - use selector from DB
+                    age_el = event.select_one(sel.get('target_group_age', '.event-archive-item-age span'))
                     if age_el:
                         age_text = age_el.get_text(strip=True)
                         if age_text:
                             target_parts.append(age_text)
                     
-                    # 2. Activity type/location label (e.g., "Tensta", "Kurser")
-                    # Note: "Tensta" is actually a location (Tekniska i Tensta branch)
-                    type_el = event.select_one('.event-archive-item-type span')
+                    # 2. Activity type/location label - use selector from DB
+                    type_el = event.select_one(sel.get('target_group_type', '.event-archive-item-type span'))
                     location = "Tekniska museet"  # Default location
                     if type_el:
                         type_text = type_el.get_text(strip=True)
@@ -647,8 +694,8 @@ class MultiSiteEventSpider(scrapy.Spider):
                                 # Not a location, add to target_parts
                                 target_parts.append(type_text)
                     
-                    # 3. Tags (e.g., "Klubb", "Lov", "Event")
-                    tags_els = event.select('.archive-item-tags li span')
+                    # 3. Tags - use selector from DB
+                    tags_els = event.select(sel.get('target_group_tags', '.archive-item-tags li span'))
                     for tag_el in tags_els:
                         tag_text = tag_el.get_text(strip=True)
                         if tag_text:
@@ -697,12 +744,58 @@ class MultiSiteEventSpider(scrapy.Spider):
                     self.logger.warning(f"Error extracting Tekniska event: {e}")
                     continue
             
+            # [NEW] AI FALLBACK: If no events extracted, try AI
+            if len(events) == 0:
+                self.logger.warning("Tekniska: No events found with selectors. Trying AI fallback...")
+                try:
+                    # Use already-fetched HTML from cloudscraper
+                    page_text = soup.get_text(separator=' ', strip=True)[:8000]
+                    ai_result = self.call_ai_engine(page_text, include_selectors=False)
+                    if ai_result:
+                        events_list = ai_result if isinstance(ai_result, list) else ai_result.get('events', [])
+                        for event_data in events_list:
+                            item = EventCategoryItem()
+                            item['event_name'] = event_data.get('event_name', 'Unknown')
+                            item['event_url'] = response.url
+                            item['date_iso'] = event_data.get('date_iso', '')
+                            item['date'] = event_data.get('date_iso', '')
+                            item['end_date_iso'] = event_data.get('end_date_iso', 'N/A')
+                            item['time'] = event_data.get('time', 'N/A')
+                            item['description'] = event_data.get('description', 'N/A')
+                            item['location'] = event_data.get('location', 'Tekniska museet')
+                            item['target_group'] = event_data.get('target_group', 'All')
+                            item['target_group_normalized'] = self.simple_normalize(event_data.get('target_group', 'All'))
+                            item['status'] = event_data.get('status', 'scheduled')
+                            item['booking_info'] = 'N/A'
+                            self.logger.info(f"  [AI] -> {item['event_name']}: {item['date_iso']}")
+                            yield item
+                        self.logger.info(f"Tekniska AI fallback extracted {len(events_list)} events.")
+                except Exception as e:
+                    self.logger.error(f"Tekniska AI fallback failed: {e}")
+            
             return  # Exit after Tekniska handler
         
         
         # === MODERNA MUSEET HANDLER ===
         if "modernamuseet.se" in response.url:
             self.logger.info("Detected Moderna Museet. Using specialized DOM parser.")
+            
+            # [NEW] Get selectors from database
+            moderna_selectors = self.db.get_selectors(response.url)
+            if moderna_selectors:
+                self.logger.info(f"Using DB selectors for Moderna: {moderna_selectors.get('container')}")
+                moderna_sel = moderna_selectors.get('items', {})
+            else:
+                self.logger.info("No DB selectors for Moderna. Using fallback hardcoded selectors.")
+                moderna_sel = {
+                    'event_name': '.calendar__item-title::text',
+                    'event_url': '.calendar__item-share a.read-more::attr(href)',
+                    'time': '.calendar__item-category time::text',
+                    'description': '.calendar__item-extended-content p::text',
+                    'location': '.calendar__item-share li a::text',
+                    'target_group': '.calendar__item-category li::text'
+                }
+            container_sel = moderna_selectors.get('container', 'article.calendar__item') if moderna_selectors else 'article.calendar__item'
             
             # Since content is SSR, we can parse page content directly
             # We use Selector on the page content to allow using standard Scrapy selectors
@@ -739,61 +832,50 @@ class MultiSiteEventSpider(scrapy.Spider):
                     self.logger.info(f"Date {date_str} exceeds limit {limit_date}. Stopping extraction.")
                     break # Assuming chronological order
                 
-                # Extract events within this day
-                events = day.css('article.calendar__item')
+                # Extract events within this day - use container from DB
+                events = day.css(container_sel)
                 
                 for event in events:
                     try:
-                        # 1. Title
-                        title = event.css('.calendar__item-title::text').get()
+                        # 1. Title - use selector from DB
+                        title = event.css(moderna_sel.get('event_name', '.calendar__item-title::text')).get()
                         if not title:
                             continue
                         title = title.strip()
                         
-                        # 2. Link
-                        # Try to find specific link in "Läs mer" or shared links
-                        # Often in .calendar__item-share a.read-more
-                        event_url = event.css('.calendar__item-share a.read-more::attr(href)').get()
+                        # 2. Link - use selector from DB
+                        event_url = event.css(moderna_sel.get('event_url', '.calendar__item-share a.read-more::attr(href)')).get()
                         
                         if not event_url:
-                            # Fallback: check if title is inside valid link (unlikely here)
-                            # Or check if there is any other link
                             event_url = response.url # Default to calendar page if no specific link
                         else:
                             event_url = response.urljoin(event_url)
                             
-                        # 3. Time
-                        # <ul class="calendar__item-category"> <li><time>10.30</time></li> ...
-                        time_val = event.css('.calendar__item-category time::text').get()
+                        # 3. Time - use selector from DB
+                        time_val = event.css(moderna_sel.get('time', '.calendar__item-category time::text')).get()
                         if not time_val:
                             time_val = 'N/A'
                         else:
                             time_val = extract_time_only(time_val)
                             
-                        # 4. Description
-                        # .calendar__item-extended-content p
-                        description = event.css('.calendar__item-extended-content p::text').get()
+                        # 4. Description - use selector from DB
+                        description = event.css(moderna_sel.get('description', '.calendar__item-extended-content p::text')).get()
                         if not description:
                             description = 'N/A'
                         else:
                             description = description.strip()
                             
-                        # 5. Location
-                        # .calendar__item-share li containing svg location -> a::text
-                        # This is tricky with CSS, let's look for link after location icon
-                        # We can try to get all text in .calendar__item-share li that does NOT have class "read-more"
-                        # Or iterate li's
+                        # 5. Location - use selector from DB (with fallback logic)
                         location = "Moderna Museet"
                         share_items = event.css('.calendar__item-share li')
                         for li in share_items:
-                            if li.css('svg use[xlink\:href*="#location"]'):
+                            if li.css('svg use[xlink\\:href*="#location"]'):
                                 loc_text = li.css('a::text').get()
                                 if loc_text:
                                     location = loc_text.strip()
                                     break
                         
-                        # 6. Target Group
-                        # .calendar__item-category li (text that is not time)
+                        # 6. Target Group - use selector from DB
                         tags = []
                         cat_items = event.css('.calendar__item-category li')
                         for li in cat_items:
@@ -829,6 +911,36 @@ class MultiSiteEventSpider(scrapy.Spider):
                         continue
 
             self.logger.info(f"Moderna Museet: Extracted {extracted_count} events.")
+            
+            # [NEW] AI FALLBACK: If no events extracted, try AI
+            if extracted_count == 0:
+                self.logger.warning("Moderna: No events extracted with selectors. Trying AI fallback...")
+                try:
+                    page_text = await page.inner_text("body")
+                    page_text = re.sub(r'\s+', ' ', page_text).strip()[:8000]
+                    ai_result = self.call_ai_engine(page_text, include_selectors=False)
+                    if ai_result:
+                        events_list = ai_result if isinstance(ai_result, list) else ai_result.get('events', [])
+                        for event_data in events_list:
+                            item = EventCategoryItem()
+                            item['event_name'] = event_data.get('event_name', 'Unknown')
+                            item['event_url'] = response.url
+                            item['date_iso'] = event_data.get('date_iso', '')
+                            item['date'] = event_data.get('date_iso', '')
+                            item['end_date_iso'] = event_data.get('end_date_iso', 'N/A')
+                            item['time'] = event_data.get('time', 'N/A')
+                            item['description'] = event_data.get('description', 'N/A')
+                            item['location'] = event_data.get('location', 'Moderna Museet')
+                            item['target_group'] = event_data.get('target_group', 'All')
+                            item['target_group_normalized'] = self.simple_normalize(event_data.get('target_group', 'All'))
+                            item['status'] = event_data.get('status', 'scheduled')
+                            item['booking_info'] = 'N/A'
+                            self.logger.info(f"  [AI] -> {item['event_name']}: {item['date_iso']}")
+                            yield item
+                        self.logger.info(f"Moderna AI fallback extracted {len(events_list)} events.")
+                except Exception as e:
+                    self.logger.error(f"Moderna AI fallback failed: {e}")
+            
             await page.close()
             return
 
@@ -856,66 +968,149 @@ class MultiSiteEventSpider(scrapy.Spider):
             if not clicked: break 
 
         # === STEP C: ATTEMPT FAST PATH (SELECTORS) ===
+        # [MODIFIED] Now reads from selectors.db for ALL sites (including Stockholm Library)
+        # Run seed_selectors.py to populate the database with selectors
         selectors = self.db.get_selectors(response.url)
         
-        if "biblioteket.stockholm.se" in response.url:
-            selectors = {
-                'container': 'article',
-                'items': {
-                    'event_name': 'h2 a',
-                    'event_url': 'h2 a',  # Get event link for detail page navigation
-                    'date_iso': 'time',
-                    'date_range_text': 'time',  # [NEW] Full date text for extracting end date (e.g., "Tisdag 26 dec - onsdag 31 dec")
-                    'time': 'section > div:nth-child(3) p',
-                    'location': 'section > div:nth-child(4) p',
-                    'target_group_raw': 'section p',  # [NEW] Look for Målgrupp field  
-                    'status_indicator': 'div p',  # For detecting "Inställt" overlay
-                    'booking_status': 'p'  # [FIXED] Get all paragraph elements to find booking info text
-                    # [REMOVED] 'description' - force detail page fetch for full descriptions
-                }
-            }
-            self.logger.info("Using hardcoded stable selectors for Stockholm Library.")
+        if selectors:
+            self.logger.info(f"Using DB selectors for {response.url}: container='{selectors.get('container')}'")
+        else:
+            self.logger.info(f"No DB selectors found for {response.url}. Will use AI fallback.")
+        
         extracted_data = []
         fast_path_success = False
         
         # [NEW] Special Handling for Armemuseum (Two-Step Crawling)
+        # Strategy: Extract name/date from calendar cards, then get description from detail page
         if "armemuseum.se" in response.url:
-            self.logger.info("Detected Armemuseum. Using Two-Step Crawling Strategy.")
-            # Find all event links
-            # Based on inspection, links might be in <a> tags or clickable elements.
-            # Using a broad strategy to find links to /event/ or similar
+            self.logger.info("Detected Armemuseum. Using Hybrid Extraction Strategy.")
             
-            # Extract all links
-            links = await page.evaluate("""
+            # [NEW] Get selectors from database
+            arme_selectors = self.db.get_selectors(response.url)
+            if arme_selectors:
+                self.logger.info(f"Using DB selectors for Armemuseum: {arme_selectors.get('container')}")
+                sel = arme_selectors.get('items', {})
+            else:
+                self.logger.info("No DB selectors for Armemuseum. Using fallback hardcoded selectors.")
+                sel = {
+                    'event_name': 'span.font-mulish.font-black',
+                    'date_range': 'span.text-xs.leading-7.font-roboto'
+                }
+            
+            # Extract event cards from the calendar page using JavaScript
+            # Each card contains: event_name, date_range, event_url
+            # NOTE: The <a> element itself contains the name/date spans (not a parent div!)
+            event_cards = await page.evaluate("""
                 () => {
-                    const links = Array.from(document.querySelectorAll('a'));
-                    return links.map(a => a.href);
+                    const cards = [];
+                    // Find all event links on the calendar page
+                    const eventLinks = Array.from(document.querySelectorAll('a[href*="/event/"]'));
+                    
+                    eventLinks.forEach(link => {
+                        // Query directly on the link element (not on parent)
+                        // because the spans are children of <a>
+                        const nameEl = link.querySelector('span.font-mulish.font-black');
+                        const name = nameEl ? nameEl.innerText.trim() : null;
+                        
+                        // Get date range (e.g., "28 december - 6 januari")
+                        // Try multiple selectors for robustness
+                        let dateEl = link.querySelector('span.text-xs.leading-7.font-roboto');
+                        if (!dateEl) {
+                            dateEl = link.querySelector('span.font-roboto');
+                        }
+                        const dateRange = dateEl ? dateEl.innerText.trim() : null;
+                        
+                        // Get event URL
+                        const url = link.href;
+                        
+                        if (name && url && url.includes('/event/')) {
+                            cards.push({ name, dateRange, url });
+                        }
+                    });
+                    
+                    // Deduplicate by URL
+                    const seen = new Set();
+                    return cards.filter(c => {
+                        if (seen.has(c.url)) return false;
+                        seen.add(c.url);
+                        return true;
+                    });
                 }
             """)
             
-            event_links = set()
-            for link in links:
-                # Filter for event links 
-                if "/event/" in link or "/kalender/" in link: # Adjust based on actual URL structure
-                     if link != response.url: # Exclude self
-                        event_links.add(link)
+            self.logger.info(f"Found {len(event_cards)} event cards on calendar page")
             
-            self.logger.info(f"Found {len(event_links)} potential event links: {list(event_links)[:5]}...")
-            
-            for link in event_links:
+            # Process each event card
+            for card in event_cards:
+                event_name = card.get('name', 'Unknown Event')
+                date_range = card.get('dateRange', '')
+                event_url = card.get('url', '')
+                
+                self.logger.info(f"  -> {event_name}: {date_range}")
+                
+                # Parse date range (e.g., "28 december - 6 januari")
+                date_iso = None
+                end_date_iso = None
+                if date_range:
+                    if ' - ' in date_range:
+                        parts = date_range.split(' - ')
+                        if len(parts) == 2:
+                            date_iso = parse_swedish_date(parts[0].strip())
+                            end_date_iso = parse_swedish_date(parts[1].strip())
+                    else:
+                        date_iso = parse_swedish_date(date_range)
+                
+                if not date_iso:
+                    self.logger.warning(f"Could not parse date from: {date_range}")
+                    continue
+                
+                # Request detail page for description, passing the extracted data
                 yield scrapy.Request(
-                    link,
+                    event_url,
                     callback=self.parse_details,
                     meta={
                         'playwright': True,
                         'playwright_include_page': True,
                         'playwright_page_methods': [
                             PageMethod("wait_for_load_state", "domcontentloaded"),
-                            PageMethod("wait_for_timeout", 1000),  # [OPTIMIZED] Reduced from 2000ms
+                            PageMethod("wait_for_timeout", 1000),
                         ],
-                        'is_event_detail': True # Flag to indicate this is a detail page
+                        'is_event_detail': True,
+                        # Pass extracted data from calendar page
+                        'arme_event_name': event_name,
+                        'arme_date_iso': date_iso,
+                        'arme_end_date_iso': end_date_iso,
                     }
                 )
+            
+            # [NEW] AI FALLBACK: If no event cards found, try AI
+            if len(event_cards) == 0:
+                self.logger.warning("Armemuseum: No event cards found. Trying AI fallback...")
+                try:
+                    page_text = await page.inner_text("body")
+                    page_text = re.sub(r'\s+', ' ', page_text).strip()[:8000]
+                    ai_result = self.call_ai_engine(page_text, include_selectors=False)
+                    if ai_result:
+                        events_list = ai_result if isinstance(ai_result, list) else ai_result.get('events', [])
+                        for event_data in events_list:
+                            item = EventCategoryItem()
+                            item['event_name'] = event_data.get('event_name', 'Unknown')
+                            item['event_url'] = response.url
+                            item['date_iso'] = event_data.get('date_iso', '')
+                            item['date'] = event_data.get('date_iso', '')
+                            item['end_date_iso'] = event_data.get('end_date_iso', 'N/A')
+                            item['time'] = event_data.get('time', 'N/A')
+                            item['description'] = event_data.get('description', 'N/A')
+                            item['location'] = event_data.get('location', 'Armémuseum')
+                            item['target_group'] = event_data.get('target_group', 'All')
+                            item['target_group_normalized'] = self.simple_normalize(event_data.get('target_group', 'All'))
+                            item['status'] = event_data.get('status', 'scheduled')
+                            item['booking_info'] = 'N/A'
+                            self.logger.info(f"  [AI] -> {item['event_name']}: {item['date_iso']}")
+                            yield item
+                        self.logger.info(f"Armemuseum AI fallback extracted {len(events_list)} events.")
+                except Exception as e:
+                    self.logger.error(f"Armemuseum AI fallback failed: {e}")
             
             # Close page and return (skip generic logic)
             await page.close()
@@ -1241,14 +1436,79 @@ class MultiSiteEventSpider(scrapy.Spider):
 
     async def parse_details(self, response):
         page = response.meta.get("playwright_page")
+        
+        self.logger.info(f"Extracting details from: {response.url}")
+        
+        # === ARMEMUSEUM DETAIL PAGE HANDLER ===
+        # Uses data passed from calendar page (name, date) + extracts description from detail page
+        if "armemuseum.se/event/" in response.url:
+            # Get data passed from calendar page
+            event_name = response.meta.get('arme_event_name')
+            date_iso = response.meta.get('arme_date_iso')
+            end_date_iso = response.meta.get('arme_end_date_iso')
+            
+            # If no calendar data was passed, skip (this shouldn't happen with proper flow)
+            if not event_name or not date_iso:
+                self.logger.warning(f"No calendar data passed for: {response.url}")
+                if page:
+                    await page.close()
+                return
+            
+            self.logger.info(f"Processing Armemuseum detail: {event_name}")
+            
+            try:
+                if page:
+                    # Extract description from detail page (all .richtext p elements)
+                    desc_els = page.locator('.richtext p')
+                    desc_texts = await desc_els.all_inner_texts() if await desc_els.count() > 0 else []
+                    description = ' '.join(desc_texts).strip()[:500]  # Limit to 500 chars
+                    await page.close()
+                else:
+                    description = 'N/A'
+                
+                # Extract location from description (look for "Armémuseum" or similar)
+                location = "Armémuseum"  # Default
+                
+                # Extract target group from description (keyword detection)
+                target_group = "All"
+                desc_lower = description.lower()
+                if any(kw in desc_lower for kw in ['barn', 'familj', 'kids', 'children']):
+                    target_group = "Families and Children"
+                elif any(kw in desc_lower for kw in ['vuxna', 'adult']):
+                    target_group = "Adults"
+                
+                # Create Item
+                item = EventCategoryItem()
+                item['event_name'] = event_name
+                item['event_url'] = response.url
+                item['date_iso'] = date_iso
+                item['date'] = date_iso
+                item['end_date_iso'] = end_date_iso or 'N/A'
+                item['time'] = 'N/A'  # Not available on this site
+                item['location'] = location
+                item['description'] = description or 'N/A'
+                item['target_group'] = target_group
+                item['target_group_normalized'] = self.simple_normalize(target_group)
+                item['status'] = detect_cancelled_status(event_name, description)
+                item['booking_info'] = 'N/A'
+                
+                self.logger.info(f"  -> {event_name}: {date_iso} to {end_date_iso or 'N/A'}")
+                yield item
+                return
+                
+            except Exception as e:
+                self.logger.error(f"Error extracting Armemuseum detail page: {e}")
+                if page:
+                    await page.close()
+                return
+        
+        # === FALLBACK: AI EXTRACTION FOR OTHER SITES ===
         if not page:
-             # If playwright page is missing (shouldn't happen with current meta), fallback to response.text
+             # If playwright page is missing, fallback to response.text
              text = " ".join(response.xpath('//body//text()').getall())
         else:
              text = await page.inner_text("body")
              await page.close()
-
-        self.logger.info(f"Extracting details from: {response.url}")
         
         # Clean text
         text = re.sub(r'\s+', ' ', text).strip()

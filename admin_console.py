@@ -254,7 +254,8 @@ with tabs[0]:
     if 'page' not in st.session_state:
         st.session_state.page = 1
     
-    filter_col1, filter_col2, filter_col3 = st.columns(3)
+    # Row 1: Search, Venue, Source Website, Date Range
+    filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
     
     with filter_col1:
         search = st.text_input("Search", placeholder="e.g. Workshop")
@@ -264,6 +265,10 @@ with tabs[0]:
         venue = st.selectbox("Venue", venues)
     
     with filter_col3:
+        sources = ["All Sources"] + db.get_unique_sources()
+        source = st.selectbox("Source Website", sources)
+    
+    with filter_col4:
         date_range = st.selectbox("Date Range", ["Next 30 Days", "This Week", "All Time"])
     
     target_groups = st.multiselect("Target Group", options=["All", "Children", "Adults", "Families"], 
@@ -276,19 +281,94 @@ with tabs[0]:
     per_page = 20
     events_filtered, total_count = db.get_events_filtered(
         search=search, venue=venue, date_range=date_range, 
-        target_groups=target_groups, page=st.session_state.page, per_page=per_page
+        target_groups=target_groups, source=source, page=st.session_state.page, per_page=per_page
     )
     
     total_pages = math.ceil(total_count / per_page) if total_count > 0 else 1
     
+    # Custom CSS for card styling
+    st.markdown("""
+    <style>
+    .stExpander {
+        border: none !important;
+        background: transparent !important;
+    }
+    div[data-testid="stExpander"] > details {
+        border: none !important;
+        background: transparent !important;
+    }
+    div[data-testid="stExpander"] > details > summary {
+        padding: 0 !important;
+        font-size: 0.85rem;
+        color: #8b5cf6;
+    }
+    .age-badge {
+        background: linear-gradient(135deg, #6366f1, #8b5cf6);
+        color: white;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 0.8rem;
+        font-weight: 500;
+        display: inline-block;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
     if events_filtered:
-        for event in events_filtered:
-            with st.expander(f"**{event['event_name']}** | {event['date_iso']} | {event['location'] or 'N/A'} | {event['target_group'] or 'N/A'}"):
-                st.write(f"📝 **Description:** {event['description'] or 'N/A'}")
-                st.write(f"🕐 **Time:** {event['time'] or 'N/A'}")
-                st.write(f"🎫 **Booking:** {event['booking_info'] or 'N/A'}")
-                if event.get('event_url'):
-                    st.write(f"🔗 [Event Link]({event['event_url']})")
+        for idx, event in enumerate(events_filtered):
+            # Format date for display (with optional end date)
+            try:
+                date_obj = datetime.strptime(event['date_iso'], "%Y-%m-%d")
+                display_date = date_obj.strftime("%d %b %Y")
+                
+                # Add end date if present
+                end_date = event.get('end_date_iso')
+                if end_date and end_date != 'N/A':
+                    try:
+                        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
+                        display_date += f" → {end_date_obj.strftime('%d %b %Y')}"
+                    except:
+                        pass
+            except:
+                display_date = event['date_iso'] or "Date TBA"
+            
+            location = event['location'] or "Location TBA"
+            age_group = (event['target_group'] or "all_ages").replace("_", " ").title()
+            description = event['description'] or "No description available."
+            time_display = event['time'] or "Time TBA"
+            booking_display = event['booking_info'] or "Booking TBA"
+            event_url = event.get('event_url', '#')
+            
+            # Create card container
+            with st.container(border=True):
+                # Title
+                st.markdown(f"### {event['event_name']}")
+                
+                # Metadata row
+                meta_cols = st.columns([2, 2, 1.5])
+                with meta_cols[0]:
+                    st.caption(f"📅 {display_date}")
+                with meta_cols[1]:
+                    st.caption(f"📍 {location}")
+                with meta_cols[2]:
+                    st.markdown(f'<span class="age-badge">👥 {age_group}</span>', unsafe_allow_html=True)
+                
+                # Description with read more
+                if len(description) > 150:
+                    st.write(description[:150] + "...")
+                    with st.expander("Read more"):
+                        st.write(description)
+                else:
+                    st.write(description)
+                
+                # Footer row
+                footer_cols = st.columns([1, 1, 1])
+                with footer_cols[0]:
+                    st.caption(f"⏰ {time_display}")
+                with footer_cols[1]:
+                    st.caption(f"🎟️ {booking_display}")
+                with footer_cols[2]:
+                    st.link_button("View Event →", event_url, use_container_width=True)
     else:
         st.info("No events found matching your filters.")
     

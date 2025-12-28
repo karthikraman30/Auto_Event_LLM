@@ -161,7 +161,7 @@ class DatabaseManager:
         return events
 
     def get_events_filtered(self, search="", venue="All Venues", date_range="All Time", 
-                            target_groups=None, page=1, per_page=20):
+                            target_groups=None, source="All Sources", page=1, per_page=20):
         """Get filtered and paginated events."""
         conn = sqlite3.connect(self.db_path, timeout=30.0)
         cursor = conn.cursor()
@@ -176,6 +176,17 @@ class DatabaseManager:
         if venue and venue != "All Venues":
             query += " AND location = ?"
             params.append(venue)
+        
+        # Source filter - match by domain from scraping_urls
+        if source and source != "All Sources":
+            # Get the URL for this source name
+            cursor.execute("SELECT url FROM scraping_urls WHERE name = ?", (source,))
+            row = cursor.fetchone()
+            if row:
+                from urllib.parse import urlparse
+                domain = urlparse(row[0]).netloc.replace("www.", "")
+                query += " AND event_url LIKE ?"
+                params.append(f"%{domain}%")
         
         today = datetime.now().strftime("%Y-%m-%d")
         if date_range == "This Week":
@@ -281,6 +292,34 @@ class DatabaseManager:
         venues = [row[0] for row in cursor.fetchall()]
         conn.close()
         return venues
+
+    def get_unique_sources(self):
+        """Get list of unique source websites with friendly names."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        
+        # Get all scraping URLs with their names
+        cursor.execute("SELECT url, name FROM scraping_urls ORDER BY name")
+        url_name_map = {row[0]: row[1] for row in cursor.fetchall()}
+        
+        # Get unique domains from event URLs and map to source names
+        cursor.execute("SELECT DISTINCT event_url FROM events WHERE event_url IS NOT NULL")
+        event_urls = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        
+        # Match event URLs to their source name
+        sources = set()
+        for event_url in event_urls:
+            for scrape_url, name in url_name_map.items():
+                # Check if the event URL domain matches the scraping URL domain
+                from urllib.parse import urlparse
+                event_domain = urlparse(event_url).netloc.replace("www.", "")
+                scrape_domain = urlparse(scrape_url).netloc.replace("www.", "")
+                if event_domain == scrape_domain:
+                    sources.add(name)
+                    break
+        
+        return sorted(list(sources))
 
     # ==================== SETTINGS ====================
     
@@ -482,24 +521,37 @@ class DatabaseManager:
         conn = sqlite3.connect(self.db_path, timeout=30.0)
         cursor = conn.cursor()
         
-        # Extract domain from URL
+        # Extract domain and path from URL
         from urllib.parse import urlparse
         parsed = urlparse(url)
         domain = parsed.netloc.replace("www.", "")
+        url_path = parsed.path.rstrip('/')  # Normalize trailing slash
         
+        # First try exact match on domain + path
         cursor.execute('''
             SELECT container_selector, item_selectors_json 
             FROM selector_configs 
-            WHERE domain = ?
-        ''', (domain,))
+            WHERE domain = ? AND (url_pattern = ? OR url_pattern = ?)
+        ''', (domain, url_path, url_path + '/'))
         
         row = cursor.fetchone()
+        
+        # Fallback: match by domain only (for backwards compatibility)
+        if not row:
+            cursor.execute('''
+                SELECT container_selector, item_selectors_json 
+                FROM selector_configs 
+                WHERE domain = ?
+                LIMIT 1
+            ''', (domain,))
+            row = cursor.fetchone()
+        
         conn.close()
         
         if row and row[1]:
             return {
                 "container": row[0],
-                "selectors": json.loads(row[1])
+                "items": json.loads(row[1])
             }
         return None
 
