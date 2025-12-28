@@ -12,38 +12,40 @@ from apscheduler.triggers.cron import CronTrigger
 sys.path.append(os.path.join(os.getcwd(), "event_category"))
 from event_category.utils.db_manager import DatabaseManager
 
-# --- PYTHON PATH ---
-# In Streamlit Cloud (and most containerized envs), sys.executable is the correct python.
-# We trust it unless we explicitly find a venv locally (dev mode).
-VENV_PYTHON = sys.executable
+# --- PYTHON PATH (use venv Python for subprocess) ---
+# --- PYTHON PATH (use venv Python for subprocess) ---
+# Check if running on Streamlit Cloud (headless) or locally
 if os.path.exists(os.path.join(os.getcwd(), "venv")):
     VENV_PYTHON = os.path.join(os.getcwd(), "venv", "bin", "python")
+else:
+    # On Streamlit Cloud, use the same python that launched the app
+    VENV_PYTHON = sys.executable
+
+if not os.path.exists(VENV_PYTHON):
+    VENV_PYTHON = sys.executable  # Fallback
 
 def get_subprocess_env():
     """
-    Create environment dict for subprocess, verifying secrets are present.
+    Create environment dict for subprocess, injecting secrets from Streamlit
+    if available, otherwise using system environment.
     """
     env = os.environ.copy()
     
-    # 1. Inject secrets from st.secrets (Streamlit Cloud)
-    # This is critical because normal os.environ might not have them in Cloud
-    if hasattr(st, "secrets"):
-        # Direct key access
-        for key in ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GROQ_API_KEY"]:
-            if key in st.secrets:
-                env[key] = st.secrets[key]
+    # Inject secrets from st.secrets if available (Streamlit Cloud)
+    # We check for specific keys we know the scraper needs
+    sensitive_keys = ["GEMINI_API_KEY"]
+    
+    try:
+        if hasattr(st, "secrets"):
+            for key in sensitive_keys:
+                if key in st.secrets:
+                    env[key] = st.secrets[key]
+                # Also check inside "general" or "env" sections if people organize secrets that way
+                elif "env" in st.secrets and key in st.secrets["env"]:
+                    env[key] = st.secrets["env"][key]
+    except Exception as e:
+        print(f"Warning: Could not access Streamlit secrets: {e}")
         
-        # "env" section access (common pattern)
-        if "env" in st.secrets:
-            for key, value in st.secrets["env"].items():
-                env[key] = value
-
-    # 2. Validation Logging (Visible in Streamlit Cloud logs, not UI)
-    if "GEMINI_API_KEY" not in env:
-        print("CRITICAL WARNING: GEMINI_API_KEY not found in environment for subprocess!")
-    else:
-        print("Subprocess Environment: GEMINI_API_KEY is present.")
-
     return env
 
 # --- PAGE CONFIG ---
