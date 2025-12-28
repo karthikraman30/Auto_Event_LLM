@@ -12,18 +12,36 @@ from event_category.utils.db_manager import DatabaseManager
 
 def run_spider(url, index):
     """Run spider for a single URL and return result info."""
+    # Use absolute paths for production compatibility (Streamlit Cloud)
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    event_category_dir = os.path.join(base_dir, "event_category")
     output_filename = f"temp_outputs/events_{index}.json"
-    full_output_path = os.path.join("event_category", output_filename)
+    full_output_path = os.path.join(event_category_dir, output_filename)
     
     cmd = [sys.executable, "-m", "scrapy", "crawl", "universal_events", "-a", f"url={url}", "-O", output_filename]
     
     try:
-        subprocess.run(cmd, cwd="event_category", check=True, timeout=1800)
+        # CRITICAL: Pass environment variables for API keys (GEMINI_API_KEY etc.)
+        result = subprocess.run(
+            cmd, 
+            cwd=event_category_dir, 
+            check=True, 
+            timeout=1800,
+            env=os.environ.copy(),  # Pass all env vars including injected secrets
+            capture_output=True,
+            text=True
+        )
         if os.path.exists(full_output_path):
             return {"url": url, "path": full_output_path, "success": True, "error": None}
-        return {"url": url, "path": None, "success": False, "error": "Output file not created"}
+        return {"url": url, "path": None, "success": False, "error": f"Output file not created. stdout: {result.stdout[-500:] if result.stdout else 'empty'}"}
     except subprocess.TimeoutExpired:
         return {"url": url, "path": None, "success": False, "error": "Timeout after 30 minutes"}
+    except subprocess.CalledProcessError as e:
+        # Include stderr for debugging
+        error_msg = f"Exit code {e.returncode}"
+        if e.stderr:
+            error_msg += f": {e.stderr[-300:]}"
+        return {"url": url, "path": None, "success": False, "error": error_msg}
     except Exception as e:
         return {"url": url, "path": None, "success": False, "error": str(e)}
 
@@ -57,7 +75,10 @@ def main():
         print("No enabled URLs to scrape.")
         return {"events": 0, "failures": 0, "warnings": ["No enabled URLs configured"]}
     
-    os.makedirs("event_category/temp_outputs", exist_ok=True)
+    # Use absolute path for temp_outputs directory
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    temp_dir = os.path.join(base_dir, "event_category", "temp_outputs")
+    os.makedirs(temp_dir, exist_ok=True)
     
     results = []
     failures = 0

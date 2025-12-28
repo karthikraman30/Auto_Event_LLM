@@ -5,11 +5,22 @@ from datetime import datetime, timedelta
 
 class DatabaseManager:
     def __init__(self, db_path="selectors.db"):
-        # Correct pathing for different execution contexts
-        if not os.path.exists(db_path) and os.path.exists("event_category/selectors.db"):
-            self.db_path = "event_category/selectors.db"
-        else:
-            self.db_path = db_path
+        # Try multiple locations for production compatibility (Streamlit Cloud etc.)
+        possible_paths = [
+            db_path,
+            "event_category/selectors.db",
+            os.path.join(os.path.dirname(__file__), "..", "selectors.db"),  # Relative to this file
+            os.path.join(os.path.dirname(__file__), "..", "..", "selectors.db"),
+            "/mount/src/auto_event_llm/selectors.db",  # Streamlit Cloud absolute
+            "/mount/src/auto_event_llm/event_category/selectors.db",
+        ]
+        
+        self.db_path = db_path  # Default fallback
+        for path in possible_paths:
+            if path and os.path.exists(path):
+                self.db_path = path
+                break
+        
         self._init_db()
 
     def _init_db(self):
