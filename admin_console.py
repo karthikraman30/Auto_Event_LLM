@@ -12,6 +12,9 @@ from apscheduler.triggers.cron import CronTrigger
 sys.path.append(os.path.join(os.getcwd(), "event_category"))
 from event_category.utils.db_manager import DatabaseManager
 
+# --- CONSTANTS ---
+RUN_PARALLEL_FILE = "run_parallel.py"
+
 # --- PYTHON PATH (use venv Python for subprocess) ---
 # --- PYTHON PATH (use venv Python for subprocess) ---
 # Check if running on Streamlit Cloud (headless) or locally
@@ -23,6 +26,33 @@ else:
 
 if not os.path.exists(VENV_PYTHON):
     VENV_PYTHON = sys.executable  # Fallback
+
+def scrape_directly():
+    """Fallback scraping method that imports functions directly instead of subprocess."""
+    try:
+        # Import the main function from run_parallel.py
+        import importlib.util
+        import sys
+        
+        # Load run_parallel.py as a module
+        spec = importlib.util.spec_from_file_location("run_parallel", RUN_PARALLEL_FILE)
+        run_parallel = importlib.util.module_from_spec(spec)
+        
+        # Set up environment for the module
+        import os
+        env = get_subprocess_env()
+        for key, value in env.items():
+            os.environ[key] = value
+        
+        # Execute the module
+        spec.loader.exec_module(run_parallel)
+        
+        # Call the main function
+        result = run_parallel.main()
+        return result
+        
+    except Exception as e:
+        return {"events": 0, "failures": 1, "warnings": [f"Direct scraping failed: {str(e)}"]}
 
 def get_subprocess_env():
     """
@@ -62,7 +92,7 @@ def run_scheduled_scrape():
     try:
         env = get_subprocess_env()
         result = subprocess.run(
-            [VENV_PYTHON, "run_parallel.py"],
+            [VENV_PYTHON, RUN_PARALLEL_FILE],
             cwd=os.getcwd(),
             capture_output=True,
             text=True,
@@ -201,41 +231,81 @@ with tabs[0]:
         if st.button("🚀 Scrape Now", width='stretch'):
             st.session_state.log_buffer = "Starting parallel scrape...\n"
             with st.spinner("Scraping all venues... check the Logs tab for progress."):
-                import subprocess
-                import sys
-                
-                env = get_subprocess_env()
-                # Use sys.executable to ensure we use the same environment
-                process = subprocess.Popen(
-                    [VENV_PYTHON, "run_parallel.py"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    universal_newlines=True,
-                    cwd=os.getcwd(),
-                    env=env
-                )
-                
-                # Capture output in real-time
-                for line in process.stdout:
-                    st.session_state.log_buffer += line
-                
-                process.wait()
-                
-                if process.returncode == 0:
-                    # Parse results from log buffer
-                    match = re.search(r'Scraping complete: (\d+) events, (\d+) failures', st.session_state.log_buffer)
-                    if match:
-                        events_count = int(match.group(1))
-                        failures = int(match.group(2))
-                        status = "Warn" if failures > 0 else "OK"
-                        db.add_log("Manual", status, events_count, failures, None)
-                    st.success("✅ Scrape completed successfully!")
-                    st.rerun()  # Refresh to show new counts in metrics
-                else:
-                    db.add_log("Manual", "Error", 0, 1, ["Scraping failed"])
-                    st.error("❌ Scraping failed. See Logs tab for details.")
+                try:
+                    import subprocess
+                    import sys
+                    
+                    env = get_subprocess_env()
+                    
+                    # Debug information
+                    st.write(f"Python executable: {VENV_PYTHON}")
+                    st.write(f"Working directory: {os.getcwd()}")
+                    st.write(f"Environment keys: {list(env.keys())}")
+                    
+                    # Use subprocess.run instead of Popen for better error handling
+                    result = subprocess.run(
+                        [VENV_PYTHON, RUN_PARALLEL_FILE],
+                        cwd=os.getcwd(),
+                        capture_output=True,
+                        text=True,
+                        timeout=1800,  # 30 minutes timeout
+                        env=env
+                    )
+                    
+                    # Store output for parsing
+                    st.session_state.log_buffer = result.stdout
+                    if result.stderr:
+                        st.session_state.log_buffer += "\n--- STDERR ---\n" + result.stderr
+                    
+                    st.write("Subprocess output:")
+                    st.text_area("Output", result.stdout, height=200)
+                    
+                    if result.returncode == 0:
+                        # Parse results from log buffer
+                        match = re.search(r'Scraping complete: (\d+) events, (\d+) failures', result.stdout)
+                        if match:
+                            events_count = int(match.group(1))
+                            failures = int(match.group(2))
+                            status = "Warn" if failures > 0 else "OK"
+                            db.add_log("Manual", status, events_count, failures, None)
+                        st.success("✅ Scrape completed successfully!")
+                        st.rerun()  # Refresh to show new counts in metrics
+                    else:
+                        error_msg = f"Return code: {result.returncode}\nSTDERR: {result.stderr}"
+                        db.add_log("Manual", "Error", 0, 1, [error_msg])
+                        st.error(f"❌ Scraping failed. Return code: {result.returncode}")
+                        st.text_area("Error Details", result.stderr, height=200)
+                        
+                except subprocess.TimeoutExpired:
+                    error_msg = "Scraping timed out after 30 minutes"
+                    db.add_log("Manual", "Error", 0, 1, [error_msg])
+                    st.error("❌ " + error_msg)
+                except Exception as e:
+                    error_msg = f"Subprocess failed: {str(e)}"
+                    st.warning("⚠️ Subprocess method failed, trying direct import...")
+                    st.write(f"Error: {e}")
+                    
+                    # Try fallback method
+                    try:
+                        st.write("Attempting direct scraping...")
+                        result = scrape_directly()
+                        
+                        if result["events"] > 0:
+                            status = "Warn" if result["failures"] > 0 else "OK"
+                            db.add_log("Manual", status, result["events"], result["failures"], result.get("warnings"))
+                            st.success(f"✅ Direct scrape completed! {result['events']} events found.")
+                            if result["failures"] > 0:
+                                st.warning(f"⚠️ {result['failures']} failures occurred")
+                            st.rerun()
+                        else:
+                            db.add_log("Manual", "Error", 0, 1, result.get("warnings", ["Direct scraping failed"]))
+                            st.error("❌ Direct scraping also failed")
+                            
+                    except Exception as fallback_error:
+                        final_error = f"Both methods failed. Subprocess: {str(e)}, Direct: {str(fallback_error)}"
+                        db.add_log("Manual", "Error", 0, 1, [final_error])
+                        st.error("❌ Both scraping methods failed")
+                        st.text_area("Final Error", final_error, height=200)
     
     with action_col2:
         events = db.get_all_events()
