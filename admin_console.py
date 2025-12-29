@@ -27,6 +27,24 @@ else:
 if not os.path.exists(VENV_PYTHON):
     VENV_PYTHON = sys.executable  # Fallback
 
+def test_basic_functionality():
+    """Test basic functionality to isolate the issue."""
+    try:
+        # Test database connection
+        db = DatabaseManager()
+        urls = db.get_enabled_urls()
+        
+        return {
+            "database_working": True,
+            "enabled_urls_count": len(urls),
+            "urls": urls[:3] if urls else []  # Show first 3 URLs
+        }
+    except Exception as e:
+        return {
+            "database_working": False,
+            "error": str(e)
+        }
+
 def scrape_directly():
     """Fallback scraping method that imports functions directly instead of subprocess."""
     try:
@@ -308,6 +326,23 @@ with tabs[0]:
                         st.text_area("Final Error", final_error, height=200)
     
     with action_col2:
+        # Add debug test button
+        if st.button("🔍 Debug Test", width='stretch'):
+            with st.spinner("Running basic functionality test..."):
+                test_result = test_basic_functionality()
+                st.json(test_result)
+                
+                if test_result.get("database_working"):
+                    st.success("✅ Database connection working")
+                    st.write(f"Found {test_result['enabled_urls_count']} enabled URLs")
+                    if test_result['urls']:
+                        st.write("Sample URLs:")
+                        for url in test_result['urls']:
+                            st.write(f"- {url}")
+                else:
+                    st.error("❌ Database connection failed")
+                    st.error(test_result.get("error", "Unknown error"))
+        
         events = db.get_all_events()
         if events:
             df_export = pd.DataFrame(events)
