@@ -526,16 +526,63 @@ with tabs[0]:
     
     # --- EVENTS TABLE ---
     st.markdown("---")
-    st.subheader("📋 EVENTS")
     
     per_page = 20
+    
+    # To handle pagination with event expansion, we fetch more events from DB
+    # since they will expand into multiple days. Fetch 3x to account for multi-day events
+    db_per_page = per_page * 3
+    
     events_filtered, total_count = db.get_events_filtered(
         search=search, venue=venue, date_range=date_range, 
-        target_groups=target_groups, source=source, page=st.session_state.page, per_page=per_page,
+        target_groups=target_groups, source=source, page=st.session_state.page, per_page=db_per_page,
         filter_date=filter_date.strftime("%Y-%m-%d") if filter_date else None
     )
     
+    # After expansion, trim to exactly per_page events for display
+    if len(events_filtered) > per_page:
+        events_filtered = events_filtered[:per_page]
+    
+    # Calculate total pages based on per_page (not expanded count)
     total_pages = math.ceil(total_count / per_page) if total_count > 0 else 1
+    
+    # Group events by name and date to combine multiple time slots
+    grouped_events = {}
+    for event in events_filtered:
+        event_key = (event['event_name'], event['date_iso'])
+        if event_key not in grouped_events:
+            grouped_events[event_key] = {
+                'event_name': event['event_name'],
+                'date_iso': event['date_iso'],
+                'location': event['location'],
+                'target_group': event['target_group'],
+                'description': event['description'],
+                'booking_info': event['booking_info'],
+                'event_url': event['event_url'],
+                'status': event['status'],
+                'times': [],
+                'urls': []
+            }
+        
+        # Add time and URL if not already present
+        if event['time'] and event['time'] not in grouped_events[event_key]['times']:
+            grouped_events[event_key]['times'].append(event['time'])
+        if event['event_url'] and event['event_url'] not in grouped_events[event_key]['urls']:
+            grouped_events[event_key]['urls'].append(event['event_url'])
+    
+    # Convert grouped events back to list for display
+    events_display = list(grouped_events.values())
+    
+    # Count cancelled events in current view
+    cancelled_count = sum(1 for e in events_display if e.get('status', 'scheduled').lower() == 'cancelled')
+    
+    # Display events section header with cancelled count
+    events_header = "📋 EVENTS"
+    if cancelled_count > 0:
+        events_header += f" (⚠️ {cancelled_count} cancelled)"
+    
+    st.markdown("---")
+    st.subheader(events_header)
     
     # Custom CSS for card styling
     st.markdown("""
@@ -565,8 +612,8 @@ with tabs[0]:
     </style>
     """, unsafe_allow_html=True)
     
-    if events_filtered:
-        for idx, event in enumerate(events_filtered):
+    if events_display:
+        for idx, event in enumerate(events_display):
             # Format date for display
             try:
                 date_obj = datetime.strptime(event['date_iso'], "%Y-%m-%d")
@@ -577,45 +624,76 @@ with tabs[0]:
             location = event['location'] or "Location TBA"
             age_group = (event['target_group'] or "all_ages").replace("_", " ").title()
             description = event['description'] or "No description available."
-            time_display = event['time'] or "Time TBA"
-            booking_display = event['booking_info'] or "Booking TBA"
-            event_url = event.get('event_url', '#')
             
-            # Create card container
-            with st.container(border=True):
-                # Title
-                st.markdown(f"### {event['event_name']}")
+            # Format multiple times separated by comma
+            if event['times']:
+                time_display = ", ".join(sorted(event['times']))
+            else:
+                time_display = "Time TBA"
                 
-                # Metadata row
-                meta_cols = st.columns([2, 2, 1.5])
-                with meta_cols[0]:
-                    st.caption(f"📅 {display_date}")
-                with meta_cols[1]:
-                    st.caption(f"📍 {location}")
-                with meta_cols[2]:
-                    st.markdown(f'<span class="age-badge">👥 {age_group}</span>', unsafe_allow_html=True)
-                
-                # Description with read more
-                if len(description) > 150:
-                    st.write(description[:150] + "...")
-                    with st.expander("Read more"):
+            booking_display = event['booking_info'] or "Booking TBA"
+            event_url = event['urls'][0] if event['urls'] else '#'  # Use first URL
+            event_status = event.get('status', 'scheduled').lower()
+            is_cancelled = event_status == 'cancelled'
+            
+            # Create card container with special styling for cancelled events
+            if is_cancelled:
+                # Cancelled event styling - greyed out with red accent
+                st.markdown(f"""
+                <div style="border: 2px solid #ff4444; border-radius: 8px; padding: 15px; background-color: #fff5f5; opacity: 0.85;">
+                    <div style="position: relative;">
+                        <span style="position: absolute; top: -10px; right: 10px; background-color: #ff4444; color: white; padding: 4px 12px; border-radius: 20px; font-weight: bold; font-size: 12px;">CANCELLED</span>
+                        <h3 style="color: #666; text-decoration: line-through;">{event['event_name']}</h3>
+                        <div style="display: flex; gap: 20px; margin: 10px 0; color: #999; font-size: 13px;">
+                            <span>📅 {display_date}</span>
+                            <span>📍 {location}</span>
+                            <span>👥 {age_group}</span>
+                        </div>
+                        <p style="color: #999; font-size: 13px; margin: 10px 0;">{description[:150]}{"..." if len(description) > 150 else ""}</p>
+                        <div style="display: flex; gap: 20px; font-size: 13px; color: #999;">
+                            <span>⏰ {time_display}</span>
+                            <span>🎟️ {booking_display}</span>
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                # Normal event card
+                with st.container(border=True):
+                    # Title
+                    st.markdown(f"### {event['event_name']}")
+                    
+                    # Metadata row
+                    meta_cols = st.columns([2, 2, 1.5])
+                    with meta_cols[0]:
+                        st.caption(f"📅 {display_date}")
+                    with meta_cols[1]:
+                        st.caption(f"📍 {location}")
+                    with meta_cols[2]:
+                        st.markdown(f'<span class="age-badge">👥 {age_group}</span>', unsafe_allow_html=True)
+                    
+                    # Description with read more
+                    if len(description) > 150:
+                        st.write(description[:150] + "...")
+                        with st.expander("Read more"):
+                            st.write(description)
+                    else:
                         st.write(description)
-                else:
-                    st.write(description)
-                
-                # Footer row
-                footer_cols = st.columns([1, 1, 1])
-                with footer_cols[0]:
-                    st.caption(f"⏰ {time_display}")
-                with footer_cols[1]:
-                    st.caption(f"🎟️ {booking_display}")
-                with footer_cols[2]:
-                    st.link_button("View Event →", event_url, width='stretch')
+                    
+                    # Footer row
+                    footer_cols = st.columns([1, 1, 1])
+                    with footer_cols[0]:
+                        st.caption(f"⏰ {time_display}")
+                    with footer_cols[1]:
+                        st.caption(f"🎟️ {booking_display}")
+                    with footer_cols[2]:
+                        st.link_button("View Event →", event_url, width='stretch')
     else:
         st.info("No events found matching your filters.")
     
     # --- PAGINATION ---
-    st.caption(f"Showing {(st.session_state.page - 1) * per_page + 1}-{min(st.session_state.page * per_page, total_count)} of {total_count}")
+    grouped_count = len(events_display)
+    st.caption(f"Showing {grouped_count} event{(grouped_count != 1) and 's' or ''} (grouped from {total_count} total instances)")
     
     pag_col1, pag_col2, pag_col3 = st.columns([1, 3, 1])
     with pag_col1:

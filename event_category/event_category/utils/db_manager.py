@@ -201,18 +201,24 @@ class DatabaseManager:
         
         today = datetime.now().strftime("%Y-%m-%d")
         
-        # If filter_date is provided, show all events that occur on that date
+        # If filter_date is provided, show only events on that specific date
         if filter_date:
+            # For specific date filtering, we need to match events that span the date range
             query += " AND date_iso <= ? AND (end_date_iso >= ? OR end_date_iso = 'N/A')"
             params.extend([filter_date, filter_date])
-        elif date_range == "This Week":
-            week_end = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
-            query += " AND date_iso >= ? AND date_iso <= ?"
-            params.extend([today, week_end])
-        elif date_range == "Next 30 Days":
-            month_end = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
-            query += " AND date_iso >= ? AND date_iso <= ?"
-            params.extend([today, month_end])
+        else:
+            # Always exclude past events - show only from today onwards
+            query += " AND date_iso >= ?"
+            params.append(today)
+            
+            if date_range == "This Week":
+                week_end = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
+                query += " AND date_iso <= ?"
+                params.append(week_end)
+            elif date_range == "Next 30 Days":
+                month_end = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
+                query += " AND date_iso <= ?"
+                params.append(month_end)
         
         if target_groups and len(target_groups) > 0 and "All" not in target_groups:
             placeholders = ",".join("?" * len(target_groups))
@@ -239,14 +245,16 @@ class DatabaseManager:
         # Expand multi-day events
         expanded_events = []
         for event in events:
-            expanded_events.extend(self._expand_event_across_days(event))
+            # If filtering by specific date, only expand to that date
+            expanded_events.extend(self._expand_event_across_days(event, filter_date=filter_date))
         
         conn.close()
         
         return expanded_events, total
     
-    def _expand_event_across_days(self, event):
-        """Expand an event that spans multiple days into separate entries for each day."""
+    def _expand_event_across_days(self, event, filter_date=None):
+        """Expand an event that spans multiple days into separate entries for each day.
+        If filter_date is provided, only return the event instance for that specific date."""
         events = []
         start_date_str = event.get('date_iso')
         end_date_str = event.get('end_date_iso')
@@ -270,11 +278,22 @@ class DatabaseManager:
             # Generate event for each day in the range
             current_date = start_date
             while current_date <= end_date:
-                event_copy = event.copy()
-                event_copy['date_iso'] = current_date.strftime("%Y-%m-%d")
-                # Keep end_date as 'N/A' for expanded events to indicate they're single-day instances
-                event_copy['end_date_iso'] = 'N/A'
-                events.append(event_copy)
+                # If filter_date is specified, only return event for that date
+                if filter_date:
+                    filter_date_obj = datetime.strptime(filter_date, "%Y-%m-%d").date()
+                    if current_date == filter_date_obj:
+                        event_copy = event.copy()
+                        event_copy['date_iso'] = current_date.strftime("%Y-%m-%d")
+                        event_copy['end_date_iso'] = 'N/A'
+                        events.append(event_copy)
+                        break
+                else:
+                    # Return all days in the range
+                    event_copy = event.copy()
+                    event_copy['date_iso'] = current_date.strftime("%Y-%m-%d")
+                    event_copy['end_date_iso'] = 'N/A'
+                    events.append(event_copy)
+                
                 current_date += timedelta(days=1)
             
             return events

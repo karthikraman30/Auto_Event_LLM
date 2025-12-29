@@ -49,7 +49,7 @@ For each website:
 
 ### 3. AI-Powered Extraction (Gemini LLM)
 
-When selectors fail or aren't available, the spider sends page content to **Google Gemini 2.0 Flash**:
+When selectors fail or aren't available, the spider sends page content to **Google Gemini 2.5 Pro**:
 
 - Extracts: `event_name`, `date_iso`, `time`, `location`, `target_group`, `description`, `status`
 - Handles Swedish date formats (e.g., "25 december" → "2025-12-25")
@@ -117,7 +117,7 @@ The final Excel contains these columns:
 
 - **Scrapy** - Web crawling framework
 - **Playwright** - Browser automation for JavaScript-rendered content
-- **Google Gemini AI** - Intelligent data extraction fallback
+- **Google Gemini 2.5 Pro** - Advanced thinking model for intelligent data extraction
 - **BeautifulSoup + Cloudscraper** - Cloudflare bypass for protected sites
 - **Pandas + OpenPyXL** - Data manipulation and Excel export
 - **SQLite** - Persistent selector storage

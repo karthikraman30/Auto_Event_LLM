@@ -460,7 +460,7 @@ CRITICAL:
             self.logger.info(f"Executing AI call (prompt length: {len(prompt)} chars)")
             
             response = self.client.models.generate_content(
-                model="gemini-2.0-flash",
+                model="gemini-2.5-pro",
                 contents=prompt,
                 config={
                     "response_mime_type": "application/json",

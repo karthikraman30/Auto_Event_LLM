@@ -1653,7 +1653,7 @@ class MultiSiteEventSpider(scrapy.Spider):
         try:
              # Call AI
              response_gen = self.client.models.generate_content(
-                model="gemini-2.0-flash",
+                model="gemini-2.5-pro",
                 contents=prompt,
                 config={
                     "response_mime_type": "application/json",
@@ -1976,7 +1976,7 @@ class MultiSiteEventSpider(scrapy.Spider):
             self.logger.info(f"AI Prompt Preview:\n{prompt[:1500]}...")
             
             response = self.client.models.generate_content(
-                model="gemini-2.0-flash",
+                model="gemini-2.5-pro",
                 contents=prompt,
                 config={
                     "response_mime_type": "application/json",
