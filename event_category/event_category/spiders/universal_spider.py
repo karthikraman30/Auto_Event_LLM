@@ -4,7 +4,7 @@ import os
 import re
 from datetime import datetime, timedelta
 # [NEW] Import the new Google GenAI library
-from google import genai
+import google.generativeai as genai
 from scrapy_playwright.page import PageMethod
 from event_category.items import EventCategoryItem
 from event_category.utils.db_manager import DatabaseManager
