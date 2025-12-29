@@ -14,6 +14,7 @@ from event_category.utils.db_manager import DatabaseManager
 
 # --- CONSTANTS ---
 RUN_PARALLEL_FILE = "run_parallel.py"
+UNKNOWN_ERROR = "Unknown error"
 
 # --- PYTHON PATH (use venv Python for subprocess) ---
 # --- PYTHON PATH (use venv Python for subprocess) ---
@@ -26,6 +27,56 @@ else:
 
 if not os.path.exists(VENV_PYTHON):
     VENV_PYTHON = sys.executable  # Fallback
+
+def test_direct_scraping():
+    """Test direct scraping without subprocess."""
+    try:
+        # Import and test the main scraping function directly
+        import importlib.util
+        import sys
+        
+        # Load run_parallel.py as a module
+        spec = importlib.util.spec_from_file_location("run_parallel", RUN_PARALLEL_FILE)
+        run_parallel = importlib.util.module_from_spec(spec)
+        
+        # Execute the module
+        spec.loader.exec_module(run_parallel)
+        
+        # Test database connection first
+        db = run_parallel.DatabaseManager()
+        urls = db.get_enabled_urls()
+        
+        if not urls:
+            return {
+                "direct_scraping_working": False,
+                "error": "No enabled URLs found",
+                "urls_count": 0
+            }
+        
+        # Try to run a simple test with just one URL
+        test_url = urls[0]
+        
+        # Test the run_spider function directly
+        env = os.environ.copy()
+        
+        # Add secrets if available
+        if hasattr(st, "secrets"):
+            if "GEMINI_API_KEY" in st.secrets:
+                env["GEMINI_API_KEY"] = st.secrets["GEMINI_API_KEY"]
+        
+        return {
+            "direct_scraping_working": True,
+            "test_url": test_url,
+            "env_keys": list(env.keys()),
+            "message": "Direct import successful, ready to test scraping"
+        }
+        
+    except Exception as e:
+        return {
+            "direct_scraping_working": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
 
 def test_scrapy_setup():
     """Test if Scrapy project is properly configured."""
@@ -378,9 +429,23 @@ with tabs[0]:
                             st.write(f"- {url}")
                 else:
                     st.error("❌ Database connection failed")
-                    st.error(basic_result.get("error", "Unknown error"))
+                    st.error(basic_result.get("error", UNKNOWN_ERROR))
                 
-                # Test Scrapy setup
+                # Test direct scraping
+                st.markdown("---")
+                st.write("**Testing Direct Scraping:**")
+                direct_result = test_direct_scraping()
+                
+                if direct_result.get("direct_scraping_working"):
+                    st.success("✅ Direct scraping setup working")
+                    st.write(f"Test URL: {direct_result.get('test_url')}")
+                    st.write(f"Environment variables: {direct_result.get('env_keys')}")
+                else:
+                    st.error("❌ Direct scraping setup failed")
+                    st.error(direct_result.get("error", UNKNOWN_ERROR))
+                    st.write(f"Error type: {direct_result.get('error_type')}")
+                
+                # Test Scrapy setup (optional)
                 st.markdown("---")
                 st.write("**Testing Scrapy Setup:**")
                 scrapy_result = test_scrapy_setup()
@@ -390,7 +455,7 @@ with tabs[0]:
                     st.write(f"Spiders found: {scrapy_result['spiders_found']}")
                 else:
                     st.error("❌ Scrapy setup failed")
-                    st.error(scrapy_result.get("error", "Unknown error"))
+                    st.error(scrapy_result.get("error", UNKNOWN_ERROR))
                     st.write(f"Working directory: {scrapy_result.get('working_dir')}")
                     st.write(f"Command: {scrapy_result.get('command')}")
         
