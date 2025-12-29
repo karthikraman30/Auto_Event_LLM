@@ -198,7 +198,7 @@ with tabs[0]:
         st.session_state.log_buffer = ""
     
     with action_col1:
-        if st.button("🚀 Scrape Now", use_container_width=True):
+        if st.button("🚀 Scrape Now", width='stretch'):
             st.session_state.log_buffer = "Starting parallel scrape...\n"
             with st.spinner("Scraping all venues... check the Logs tab for progress."):
                 import subprocess
@@ -242,9 +242,9 @@ with tabs[0]:
         if events:
             df_export = pd.DataFrame(events)
             csv = df_export.to_csv(index=False).encode('utf-8')
-            st.download_button("📁 Export Excel", csv, "events.csv", "text/csv", use_container_width=True)
+            st.download_button("📁 Export Excel", csv, "events.csv", "text/csv", width='stretch')
         else:
-            st.button("📁 Export Excel", disabled=True, use_container_width=True)
+            st.button("📁 Export Excel", disabled=True, width='stretch')
     
     # --- FILTERS SECTION ---
     st.markdown("---")
@@ -368,7 +368,7 @@ with tabs[0]:
                 with footer_cols[1]:
                     st.caption(f"🎟️ {booking_display}")
                 with footer_cols[2]:
-                    st.link_button("View Event →", event_url, use_container_width=True)
+                    st.link_button("View Event →", event_url, width='stretch')
     else:
         st.info("No events found matching your filters.")
     
@@ -586,7 +586,7 @@ with tabs[2]:
                 "Events Found": events_display
             })
         
-        st.dataframe(pd.DataFrame(log_data), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(log_data), width='stretch', hide_index=True)
         
         # Show expandable warnings
         for log in logs:
@@ -610,9 +610,9 @@ with tabs[2]:
         if logs:
             log_df = pd.DataFrame(log_data)
             csv = log_df.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Export Logs", csv, "scraping_logs.csv", use_container_width=True)
+            st.download_button("📥 Export Logs", csv, "scraping_logs.csv", width='stretch')
     with log_btn_col2:
-        if st.button("🗑️ Clear Old Logs", use_container_width=True):
+        if st.button("🗑️ Clear Old Logs", width='stretch'):
             deleted = db.clear_old_logs(90)
             st.success(f"Cleared {deleted} old log entries.")
             st.rerun()

@@ -8,6 +8,10 @@ from google import genai
 from scrapy_playwright.page import PageMethod
 from event_category.items import EventCategoryItem
 from event_category.utils.db_manager import DatabaseManager
+# [NEW] For Auto Selector Discovery system
+from event_category.utils.auto_selector_discovery import EventScraperOrchestrator
+# [NEW] For Selector Discovery Service (AI-based)
+from event_category.utils.selector_discovery_service import SelectorDiscoveryService
 # [NEW] For Cloudflare bypass (Tekniska museet)
 import cloudscraper
 from bs4 import BeautifulSoup
@@ -264,14 +268,16 @@ def extract_booking_info(booking_text):
 class MultiSiteEventSpider(scrapy.Spider):
     name = "universal_events"
     
-    # 1. FINAL URL LIST (All 5 Sites)
+    # 1. FINAL URL LIST (All Sites + Test)
     start_urls = [
         "https://biblioteket.stockholm.se/evenemang",
         "https://biblioteket.stockholm.se/forskolor",
         "https://www.skansen.se/en/calendar/",
         "https://www.tekniskamuseet.se/pa-gang/",
         "https://armemuseum.se/kalender/",
-        "https://www.modernamuseet.se/stockholm/sv/kalender/"
+        "https://www.modernamuseet.se/stockholm/sv/kalender/",
+        # [TEST] National Museum - Testing AI fallback
+        "https://www.nationalmuseum.se/kalendarium"
     ]
 
     def configure_gemini(self):
@@ -287,6 +293,12 @@ class MultiSiteEventSpider(scrapy.Spider):
     def start_requests(self):
         self.client = self.configure_gemini()
         self.db = DatabaseManager()
+        
+        # [NEW] Initialize Auto Selector Discovery Orchestrator
+        self.orchestrator = EventScraperOrchestrator(
+            ai_client=self.client,
+            logger=self.logger
+        )
         
         if not self.client:
             self.logger.critical("Failed to initialize Gemini Client. Stopping spider.")
@@ -975,7 +987,43 @@ class MultiSiteEventSpider(scrapy.Spider):
         if selectors:
             self.logger.info(f"Using DB selectors for {response.url}: container='{selectors.get('container')}'")
         else:
-            self.logger.info(f"No DB selectors found for {response.url}. Will use AI fallback.")
+            self.logger.info(f"No DB selectors found for {response.url}. Triggering AI discovery...")
+            
+            # [NEW] AI SELECTOR DISCOVERY: If no selectors in DB, discover and cache them
+            try:
+                # Get HTML content from current page
+                html_content = await page.content()
+                
+                # Initialize discovery service
+                discovery_service = SelectorDiscoveryService(
+                    ai_client=self.client,
+                    logger=self.logger,
+                    db_manager=self.db
+                )
+                
+                # Discover and save selectors
+                result = discovery_service.discover_and_save(response.url, html_content)
+                
+                if result['success']:
+                    confidence = result.get('confidence', 0.0)
+                    self.logger.info(f"✅ AI Discovery successful (confidence: {confidence:.0%})")
+                    
+                    if result.get('saved'):
+                        # Reload selectors from database
+                        selectors = self.db.get_selectors(response.url)
+                        self.logger.info(f"💾 Selectors cached to database for future scrapes")
+                    else:
+                        # Use discovered selectors without saving (low confidence)
+                        if confidence > 0.3:  # Minimum threshold to attempt extraction
+                            selectors = {
+                                'container': result['selectors'].get('container'),
+                                'items': discovery_service._convert_to_spider_format(result['selectors'].get('items', {}))
+                            }
+                            self.logger.warning(f"⚠️ Using discovered selectors but not caching (confidence: {confidence:.0%})")
+                else:
+                    self.logger.error(f"❌ AI Discovery failed: {result.get('error', 'Unknown error')}")
+            except Exception as e:
+                self.logger.error(f"AI Discovery exception: {e}", exc_info=True)
         
         extracted_data = []
         fast_path_success = False
@@ -1156,8 +1204,8 @@ class MultiSiteEventSpider(scrapy.Spider):
                     
                     if len(clean_text) > 40:  
                         current_batch.append(clean_text)
-                        # Keep first 3 HTML snippets for selector discovery
-                        if i < 3:
+                        # [NEW] Keep HTML blocks for DOM-rich export (first 10 events)
+                        if i < 10:
                             html_snippets.append(await element.inner_html())
                     
                     if len(current_batch) >= 5:
@@ -1174,36 +1222,69 @@ class MultiSiteEventSpider(scrapy.Spider):
 
             if current_batch:
                 event_batches.append("\n---\n".join(current_batch))
+            
+            # [NEW] ULTIMATE FALLBACK: If no event elements found, grab entire page body
+            if not event_batches:
+                self.logger.warning("No event elements found with generic selectors. Using entire page body as fallback.")
+                try:
+                    page_body_text = await page.inner_text("body")
+                    # Clean and limit text
+                    page_body_text = re.sub(r'\s+', ' ', page_body_text).strip()[:15000]
+                    if page_body_text:
+                        event_batches.append(page_body_text)
+                        self.logger.info(f"Extracted {len(page_body_text)} characters from page body for AI processing")
+                except Exception as e:
+                    self.logger.error(f"Failed to extract page body: {e}")
 
-            # Process batches with AI
-            all_extracted_data = []
-            for i, batch_text in enumerate(event_batches):
-                self.logger.info(f"Processing batch {i+1}/{len(event_batches)}")
-                # For the first batch, we ask for selectors too and pass HTML
-                if i == 0:
-                    ai_result = self.call_ai_engine(batch_text, include_selectors=True, html_context=html_snippets)
-                    if ai_result:
-                        data = ai_result.get('events', [])
-                        discovered_selectors = ai_result.get('selectors')
-                        if discovered_selectors:
-                            self.logger.info(f"AI discovered selectors: {discovered_selectors}")
-                            self.db.save_selectors(
-                                response.url, 
-                                discovered_selectors.get('container'),
-                                discovered_selectors.get('items')
-                            )
-                        all_extracted_data.extend(data)
-                else:
-                    ai_result = self.call_ai_engine(batch_text, include_selectors=False)
-                    if ai_result:
-                        all_extracted_data.extend(ai_result if isinstance(ai_result, list) else ai_result.get('events', []))
+            # [NEW] Process with EventScraperOrchestrator (Auto-Discovery System)
+            self.logger.info("Using EventScraperOrchestrator for automatic selector discovery and extraction")
+            
+            try:
+                # Get full page HTML
+                page_html = await page.content()
+                
+                # Use orchestrator to discover selectors and extract events
+                all_extracted_data = self.orchestrator.scrape_new_website(
+                    url=response.url,
+                    html_content=page_html
+                )
+                
+                # If selectors were discovered and cached, save them to database
+                domain = self.orchestrator._extract_domain(response.url)
+                if domain in self.orchestrator.selector_cache:
+                    discovered_selectors = self.orchestrator.selector_cache[domain]
+                    confidence = discovered_selectors.get('confidence', {}).get('overall', 0)
+                    
+                    self.logger.info(f"Selector discovery confidence: {confidence:.1%}")
+                    
+                    # Save to database if confidence is acceptable (>0.5)
+                    if confidence > 0.5:
+                        self.db.save_selectors(
+                            response.url,
+                            discovered_selectors.get('container'),
+                            discovered_selectors.get('items')
+                        )
+                        self.logger.info(f"Saved discovered selectors to database for {domain}")
+                
+            except Exception as e:
+                self.logger.error(f"Orchestrator error: {e}", exc_info=True)
+                all_extracted_data = []
+            
+            # [NEW] Store HTML snippets for correlation with extracted events
+            # This allows us to save HTML blocks alongside the extracted event data
+            html_blocks_for_export = html_snippets  # HTML from elements we analyzed
             
             # Deduplication
             seen = set()
+            html_block_index = 0  # Track which HTML block to use
             for event in all_extracted_data:
                 key = (event.get('event_name', ''), event.get('date_iso', ''))
                 if key not in seen:
                     seen.add(key)
+                    # [NEW] Attach HTML block if available (for DOM-rich export)
+                    if html_block_index < len(html_blocks_for_export):
+                        event['_html_block'] = html_blocks_for_export[html_block_index]
+                        html_block_index += 1
                     extracted_data.append(event)
 
         await page.close()
@@ -1227,6 +1308,11 @@ class MultiSiteEventSpider(scrapy.Spider):
                 
                 item['description'] = event_data.get('description') or 'N/A'
                 
+                # [NEW] Add HTML block if available (for DOM-rich JSON export - new websites only)
+                if '_html_block' in event_data:
+                    item['html_block'] = event_data['_html_block']
+                    item['container_selector'] = 'auto_discovered_element'  # Mark as auto-discovered
+                
                 # [MODIFIED] Use extracted URL if available (e.g. from Fast Path href)
                 raw_url = event_data.get('event_url')
                 if raw_url:
@@ -1238,8 +1324,8 @@ class MultiSiteEventSpider(scrapy.Spider):
                 
                 # --- STATUS CHECK ---
                 # [MODIFIED] Check multiple sources for cancelled status
-                raw_status = event_data.get('status', '').lower()
-                status_indicator = event_data.get('status_indicator', '').lower()
+                raw_status = (event_data.get('status') or '').lower()
+                status_indicator = (event_data.get('status_indicator') or '').lower()
                 event_name_lower = event_name.lower()
                 
                 # Detect cancelled from: status field, INSTÄLLT prefix in name, or overlay indicator
@@ -1603,131 +1689,272 @@ class MultiSiteEventSpider(scrapy.Spider):
             self.logger.error(f"Error parsing details for {response.url}: {e}")
 
     def call_ai_engine(self, text_content, include_selectors=False, html_context=None, **kwargs):
-        selector_instructions = ""
-        html_section = ""
-        json_format = """
-        [
-          {
+        """
+        Optimized event extraction with better prompting and structure
+        """
+        current_date = datetime.now().strftime('%Y-%m-%d')
+        current_year = datetime.now().year
+        next_year = current_year + 1
+        
+        # Base JSON format for events
+        base_event_format = {
             "event_name": "Event Name",
             "date_iso": "2025-12-01",
-            "end_date_iso": null,
+            "end_date_iso": None,
             "time": "10:00",
-            "location": "Venue",
+            "location": "Venue Name",
             "target_group": "Adults",
-            "description": "Short description.",
+            "description": "Brief description in original language",
             "status": "scheduled"
-          }
-        ]
-        """
+        }
         
-        if include_selectors:
-            if html_context:
-                html_snippets_str = "\n---\n".join(html_context[:3])
-                html_section = f"""
-                STRUCTURE CONTEXT (HTML snippets of events):
-                {html_snippets_str}
-                """
-
-            selector_instructions = """
-            6. SELECTOR DISCOVERY:
-               - Based on the provided HTML structure, identify the most reliable CSS selector for the event container.
-               - Identify CSS selectors for EACH field (relative to the container).
-               - Use stable classes or tags. Avoid dynamic IDs.
-            """
-            json_format = """
-            {
-              "events": [
-                {
-                  "event_name": "Event Name",
-                  "date_iso": "2025-12-01",
-                  "end_date_iso": null,
-                  "time": "10:00",
-                  "location": "Venue",
-                  "target_group": "Adults",
-                  "description": "Short description.",
-                  "status": "scheduled"
-                }
-              ],
-              "selectors": {
-                "container": "article.event-card",
-                "items": {
-                  "event_name": "h2",
-                  "date_iso": ".date",
-                  "time": ".time",
-                  "location": ".venue",
-                  "description": ".teaser"
-                }
-              }
-            }
-            """
-
+        # Handle detail extraction (single event deep-dive)
         if kwargs.get('extract_details'):
-            json_format = """
-            {
-              "description": "Full description...",
-              "location": "Full address...",
-              "target_group": "Children (3-6 years)"
-            }
-            """
-            prompt = f"""
-            Task: Extract event details from the text below.
-            
-            Input Text:
-            {text_content}
-            
-            Fields to Extract:
-            1. description: The full event description. IMPORTANT: Keep the description in its original language (Swedish/Spanish/etc). Do NOT translate.
-            2. location: The specific room, place, or address.
-            3. target_group: Who is this for? (e.g. "Adults", "Children 3-5 years", "Families").
-            
-            Return JSON only.
-            {json_format}
-            """
-        else:
-            prompt = f"""
-            You are an Event Extraction Engine.
-            Task: Extract a list of events from the text below.
-            
-            {html_section}
-            
-            Input Format: The text contains multiple event listings separated by "---".
-            
-            Current Date: {datetime.now().strftime('%Y-%m-%d')}
-            IMPORTANT: For dates in January and beyond, use year 2026.
-            
-            Input Text:
-            {text_content}
-            
-            Requirements:
-            1. Output ONLY a valid JSON. No markdown.
-            2. Extract fields: event_name, date_iso (YYYY-MM-DD), end_date_iso, time, location, target_group, description, status.
-            
-            3. STATUS LOGIC:
-               - Look for keywords like "Inställt", "Cancelled", "Fullbokat".
-               - If found, set "status": "cancelled".
-               - Otherwise, set "status": "scheduled".
-            
-            4. DESCRIPTION EXTRACTION:
-               - Extract the teaser text or subtitle. Max 250 chars.
-               - Do NOT return "N/A" if text is available.
-               - IMPORTANT: Keep the description in its ORIGINAL LANGUAGE (Swedish/Spanish/etc). Do NOT translate.
-            
-            5. DATE LOGIC:
-               - "date_iso": Start date.
-               - "end_date_iso": End date (or null).
-               - Convert Swedish months (december->12, januari->01).
-            
-            {selector_instructions}
-            
-            JSON Structure:
-            {json_format}
-            """
+            prompt = self._build_detail_extraction_prompt(text_content)
+            return self._execute_ai_call(prompt, is_detail_extraction=True)
         
-        try:
-            # [DEBUG] Log the prompt content to see what text is being sent
-            self.logger.info(f"DEBUG: AI Prompt Content (first 2000 chars):\n{prompt[:2000]}")
+        # Handle selector discovery + event extraction
+        if include_selectors:
+            prompt = self._build_selector_discovery_prompt(
+                text_content, html_context, current_date, next_year
+            )
+        else:
+            # Handle simple event list extraction
+            prompt = self._build_event_extraction_prompt(
+                text_content, current_date, next_year
+            )
+        
+        return self._execute_ai_call(prompt, include_selectors=include_selectors)
+    
 
-            # [NEW] Use the new generate_content syntax
+
+    def _build_event_extraction_prompt(self, text_content, current_date, next_year):
+        """Build prompt for extracting events without selectors"""
+        return f"""You are an Event Extraction Specialist for Swedish cultural websites.
+
+    CURRENT CONTEXT:
+    - Today's date: {current_date}
+    - Current year: {datetime.now().year}
+    - Date interpretation: Dates in January-March without explicit year should use {next_year}
+
+    INPUT DATA:
+    {text_content}
+
+    EXTRACTION RULES:
+
+    1. LANGUAGE PRESERVATION:
+    - Keep ALL text (event_name, description, location) in the ORIGINAL language
+    - Do NOT translate Swedish to English
+    - Example: "Sagostund för barn" stays as "Sagostund för barn"
+
+    2. DATE EXTRACTION (CRITICAL):
+    Swedish month mapping:
+    - januari/jan → 01, februari/feb → 02, mars → 03, april → 04
+    - maj → 05, juni/jun → 06, juli/jul → 07, augusti/aug → 08
+    - september/sep → 09, oktober/okt → 10, november/nov → 11, december/dec → 12
+    
+    Format rules:
+    - Single date: "5 december" → "date_iso": "{datetime.now().year}-12-05", "end_date_iso": null
+    - Date range: "5-8 december" → "date_iso": "{datetime.now().year}-12-05", "end_date_iso": "{datetime.now().year}-12-08"
+    - Cross-month: "28 dec - 3 jan" → date_iso: "{datetime.now().year}-12-28", end_date_iso: "{next_year}-01-03"
+    - Weekday parsing: "Lördag 14 december" → ignore weekday, extract "14 december"
+    - Year inference: If month is Jan-Mar and we're in Nov-Dec, use {next_year}
+
+    3. TIME EXTRACTION:
+    - Format: "HH:MM" (24-hour)
+    - Examples: "kl. 10:00" → "10:00", "14.30" → "14:30"
+    - Time range: "10:00-12:00" → use start time "10:00"
+    - Missing time → null
+
+    4. STATUS DETECTION:
+    - Keywords indicating cancellation: "Inställt", "Cancelled", "Avbokad", "Fullbokat" (if explicitly cancelled)
+    - Default: "scheduled"
+    - Set to "cancelled" ONLY if explicitly stated
+
+    5. LOCATION EXTRACTION:
+    - Extract venue name: "Stadsbiblioteket" or "Barn- och ungdomsbiblioteket, Malmö"
+    - Include room/floor if available: "Sagoteket, plan 2"
+    - Keep in original language
+
+    6. TARGET GROUP:
+    - Look for age indicators: "barn 3-6 år" → "Children (3-6 years)"
+    - Common Swedish patterns: "vuxna" → "Adults", "familjer" → "Families"
+    - If not specified → null
+
+    7. DESCRIPTION:
+    - Extract the first descriptive sentence or teaser (max 250 characters)
+    - Keep in Swedish/original language
+    - Avoid generic text like "Välkommen!" alone
+    - If no meaningful description available → null (NOT "N/A")
+
+    8. EVENT NAME:
+    - Primary title of the event in original language
+    - Clean up extra whitespace
+
+    OUTPUT FORMAT:
+    Return ONLY valid JSON array (no markdown, no explanation):
+    [
+    {{
+        "event_name": "Babyrytmik",
+        "date_iso": "2025-12-05",
+        "end_date_iso": null,
+        "time": "10:00",
+        "location": "Stadsbiblioteket",
+        "target_group": "Babies (0-1 year)",
+        "description": "Sjung och rör dig tillsammans med ditt barn",
+        "status": "scheduled"
+    }}
+    ]
+
+    IMPORTANT: 
+    - If text contains separator "---", treat each section as separate event
+    - Extract ALL events found in the input
+    - Skip events with insufficient data (missing both name and date)
+    """
+
+    def _build_selector_discovery_prompt(self, text_content, html_context, current_date, next_year):
+        """Build prompt for discovering CSS selectors + extracting events"""
+        
+        # Prepare HTML samples
+        html_samples = ""
+        if html_context and len(html_context) > 0:
+            # Take up to 5 samples for better pattern recognition
+            samples = html_context[:5]
+            html_samples = "\n\n---HTML SAMPLE SEPARATOR---\n\n".join(samples)
+        
+        return f"""You are a Web Scraping Expert specializing in Swedish event websites.
+
+    CURRENT CONTEXT:
+    - Today's date: {current_date}
+    - Year inference: Jan-Mar dates should use {next_year}
+
+    HTML STRUCTURE SAMPLES:
+    {html_samples}
+
+    EVENT TEXT DATA:
+    {text_content}
+
+    YOUR TASKS:
+    1. Analyze the HTML structure to identify reliable CSS selectors
+    2. Extract all events from the text data
+
+    SELECTOR DISCOVERY RULES:
+
+    1. CONTAINER SELECTOR:
+    - Find the repeating element that wraps each event
+    - Prefer: semantic tags (article, section) with stable classes
+    - Avoid: generic divs, dynamic IDs (e.g., id="event-12345")
+    - Examples of GOOD selectors:
+        * "article.event-item"
+        * "div.event-card"
+        * ".events-list > li"
+    - Look for common patterns across ALL HTML samples
+
+    2. FIELD SELECTORS (relative to container):
+    - Must work with .querySelector() or .select_one() from container
+    - Prioritize:
+        a) Semantic tags: <h2>, <h3>, <time>, <address>
+        b) Stable classes: .event-title, .event-date (not .col-md-6)
+        c) Data attributes: [data-event-date]
+    
+    Required field mapping:
+    - event_name: Title/heading (h2, h3, .title, .event-name)
+    - date_iso: Date text (<time>, .date, .event-date)
+    - time: Time string (.time, .event-time, <time>)
+    - location: Venue (.location, .venue, address)
+    - description: Teaser/summary (p, .description, .teaser)
+    
+    Optional fields (if identifiable):
+    - target_group: Age/audience info
+    - status: Cancellation indicators
+
+    3. SELECTOR QUALITY CHECKS:
+    - Test selector specificity: not too generic ("div") or too specific (.class1.class2.class3)
+    - Ensure selectors work across multiple events in samples
+    - If a field has no reliable selector → set to null
+
+    EVENT EXTRACTION RULES:
+    (Same as previous - extract with Swedish language preservation, proper date parsing, etc.)
+
+    Swedish months: januari→01, februari→02, mars→03, april→04, maj→05, juni→06, 
+                    juli→07, augusti→08, september→09, oktober→10, november→11, december→12
+
+    OUTPUT FORMAT (JSON only, no markdown):
+    {{
+    "selectors": {{
+        "container": "article.event-card",
+        "items": {{
+        "event_name": "h2.event-title",
+        "date_iso": "time.event-date",
+        "time": "span.event-time",
+        "location": "address.venue",
+        "description": "p.event-description",
+        "target_group": ".audience-tag",
+        "status": null
+        }}
+    }},
+    "events": [
+        {{
+        "event_name": "Sagostund",
+        "date_iso": "2025-12-15",
+        "end_date_iso": null,
+        "time": "10:00",
+        "location": "Stadsbiblioteket",
+        "target_group": "Children (3-6 years)",
+        "description": "En mysig sagostund för de minsta",
+        "status": "scheduled"
+        }}
+    ]
+    }}
+
+    CRITICAL NOTES:
+    - Selectors must be relative to container (not full page paths)
+    - Return null for field selectors that can't be reliably determined
+    - Keep all text in original Swedish
+    - Extract ALL events from the input data
+    """
+
+    def _build_detail_extraction_prompt(self, text_content):
+        """Build prompt for extracting detailed information from single event page"""
+        return f"""Extract detailed event information from the following page content.
+
+    INPUT TEXT:
+    {text_content}
+
+    EXTRACTION RULES:
+
+    1. DESCRIPTION:
+    - Extract the FULL event description (all paragraphs)
+    - Keep in ORIGINAL language (Swedish/Spanish/etc) - DO NOT TRANSLATE
+    - Preserve paragraph breaks with \\n\\n
+    - Maximum 2000 characters
+
+    2. LOCATION:
+    - Extract complete address or venue details
+    - Include room/floor/building if specified
+    - Format: "Venue Name, Address, City" or "Room, Venue Name"
+
+    3. TARGET GROUP:
+    - Identify audience: "Adults", "Children (3-6 years)", "Families", "Teenagers", etc.
+    - Look for Swedish keywords: "barn", "vuxna", "familjer", "ungdomar"
+    - Extract age ranges when specified
+
+    OUTPUT FORMAT (JSON only):
+    {{
+    "description": "Full event description in original language...",
+    "location": "Complete venue information",
+    "target_group": "Specific audience"
+    }}
+
+    If any field cannot be determined, return null for that field.
+    """
+
+    def _execute_ai_call(self, prompt, include_selectors=False, is_detail_extraction=False):
+        """Execute the AI call with proper error handling and validation"""
+        try:
+            # Log prompt for debugging (first 1500 chars)
+            self.logger.info(f"AI Prompt Preview:\n{prompt[:1500]}...")
+            
             response = self.client.models.generate_content(
                 model="gemini-2.0-flash",
                 contents=prompt,
@@ -1737,36 +1964,86 @@ class MultiSiteEventSpider(scrapy.Spider):
                 }
             )
             
-            # [NEW] Access text directly from the response object
             response_text = response.text.strip()
             
-            # Clean up potential markdown formatting
+            # Clean markdown artifacts
             if response_text.startswith("```"):
                 response_text = re.sub(r'^```(?:json)?\n?', '', response_text)
                 response_text = re.sub(r'\n?```$', '', response_text)
             
+            # Parse JSON with auto-repair
             try:
                 result = json.loads(response_text)
-            except json.JSONDecodeError:
-                # Try simple auto-repair for truncated JSON
-                fixed_text = response_text.rstrip()
-                if fixed_text.endswith(','): fixed_text = fixed_text[:-1]
-                open_braces = fixed_text.count('{') - fixed_text.count('}')
-                open_brackets = fixed_text.count('[') - fixed_text.count(']')
-                fixed_text += '}' * max(0, open_braces)
-                fixed_text += ']' * max(0, open_brackets)
-                result = json.loads(fixed_text)
+            except json.JSONDecodeError as e:
+                self.logger.warning(f"JSON decode error, attempting repair: {e}")
+                result = self._repair_json(response_text)
             
-            if isinstance(result, list): return result
+            # Validate and return appropriate format
+            if is_detail_extraction:
+                return result if isinstance(result, dict) else {}
+            
+            if include_selectors:
+                # Validate selector response
+                if not isinstance(result, dict) or 'selectors' not in result:
+                    self.logger.error("Invalid selector response format")
+                    return {"selectors": {}, "events": []}
+                return result
+            
+            # Simple event list
+            if isinstance(result, list):
+                return self._validate_events(result)
             if isinstance(result, dict):
-                if include_selectors:
-                    return result
                 for val in result.values():
-                    if isinstance(val, list): return val
+                    if isinstance(val, list):
+                        return self._validate_events(val)
+            
             return []
+            
         except Exception as e:
-            self.logger.error(f"AI Engine Error: {e}")
-            return []
+            self.logger.error(f"AI Engine Error: {e}", exc_info=True)
+            return [] if not include_selectors else {"selectors": {}, "events": []}
+
+
+    def _repair_json(self, text):
+        """Attempt to repair malformed JSON"""
+        fixed = text.rstrip()
+        
+        # Remove trailing commas
+        if fixed.endswith(','):
+            fixed = fixed[:-1]
+        
+        # Balance braces and brackets
+        open_braces = fixed.count('{') - fixed.count('}')
+        open_brackets = fixed.count('[') - fixed.count(']')
+        
+        fixed += '}' * max(0, open_braces)
+        fixed += ']' * max(0, open_brackets)
+        
+        return json.loads(fixed)
+
+
+
+    def _validate_events(self, events):
+        """Validate extracted events and filter out invalid entries"""
+        valid_events = []
+        
+        for event in events:
+            # Must have at minimum: event name and date
+            if not event.get('event_name') or not event.get('date_iso'):
+                self.logger.warning(f"Skipping invalid event: {event}")
+                continue
+            
+            # Validate date format
+            try:
+                datetime.strptime(event['date_iso'], '%Y-%m-%d')
+            except ValueError:
+                self.logger.warning(f"Invalid date format for event: {event['event_name']}")
+                continue
+            
+            valid_events.append(event)
+        
+        return valid_events
+
 
     def simple_normalize(self, target_str):
         """

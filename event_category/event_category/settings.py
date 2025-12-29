@@ -75,7 +75,8 @@ DOWNLOAD_DELAY = 0.3  # [MODIFIED] Reduce from 1s to 0.3s
 # Configure item pipelines
 # See https://docs.scrapy.org/en/latest/topics/item-pipeline.html
 ITEM_PIPELINES = {
-    "event_category.pipelines.ExcelExportPipeline": 300,
+    "event_category.pipelines.dom_export_pipeline.DomRichJsonPipeline": 100,  # DOM-rich export (new sites)
+    "event_category.pipelines.ExcelExportPipeline": 300,  # Excel export (all sites - in pipelines.py)
 }
 
 # Enable and configure the AutoThrottle extension (disabled by default)

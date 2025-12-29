@@ -17,3 +17,7 @@ class EventCategoryItem(scrapy.Item):
     status = scrapy.Field()
     booking_info = scrapy.Field()  # [NEW] "Requires booking", "Drop-in", or "N/A"
     extra_attributes = scrapy.Field()
+    
+    # [NEW] For DOM-rich JSON Lines output (new websites only)
+    html_block = scrapy.Field()  # Raw HTML of event container
+    container_selector = scrapy.Field()  # Selector that matched this element
