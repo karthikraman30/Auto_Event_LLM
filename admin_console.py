@@ -393,11 +393,6 @@ with tabs[0]:
                     
                     env = get_subprocess_env()
                     
-                    # Debug information
-                    st.write(f"Python executable: {VENV_PYTHON}")
-                    st.write(f"Working directory: {os.getcwd()}")
-                    st.write(f"Environment keys: {list(env.keys())}")
-                    
                     # Use subprocess.run instead of Popen for better error handling
                     result = subprocess.run(
                         [VENV_PYTHON, RUN_PARALLEL_FILE],
@@ -412,9 +407,6 @@ with tabs[0]:
                     st.session_state.log_buffer = result.stdout
                     if result.stderr:
                         st.session_state.log_buffer += "\n--- STDERR ---\n" + result.stderr
-                    
-                    st.write("Subprocess output:")
-                    st.text_area("Output", result.stdout, height=200)
                     
                     if result.returncode == 0:
                         # Parse results from log buffer
@@ -464,52 +456,6 @@ with tabs[0]:
                         st.text_area("Final Error", final_error, height=200)
     
     with action_col2:
-        # Add debug test button
-        if st.button("🔍 Debug Test", width='stretch'):
-            with st.spinner("Running basic functionality test..."):
-                # Test basic functionality
-                basic_result = test_basic_functionality()
-                st.json(basic_result)
-                
-                if basic_result.get("database_working"):
-                    st.success("✅ Database connection working")
-                    st.write(f"Found {basic_result['enabled_urls_count']} enabled URLs")
-                    if basic_result['urls']:
-                        st.write("Sample URLs:")
-                        for url in basic_result['urls']:
-                            st.write(f"- {url}")
-                else:
-                    st.error("❌ Database connection failed")
-                    st.error(basic_result.get("error", UNKNOWN_ERROR))
-                
-                # Test direct scraping
-                st.markdown("---")
-                st.write("**Testing Direct Scraping:**")
-                direct_result = test_direct_scraping()
-                
-                if direct_result.get("direct_scraping_working"):
-                    st.success("✅ Direct scraping setup working")
-                    st.write(f"Test URL: {direct_result.get('test_url')}")
-                    st.write(f"Environment variables: {direct_result.get('env_keys')}")
-                else:
-                    st.error("❌ Direct scraping setup failed")
-                    st.error(direct_result.get("error", UNKNOWN_ERROR))
-                    st.write(f"Error type: {direct_result.get('error_type')}")
-                
-                # Test Scrapy setup (optional)
-                st.markdown("---")
-                st.write("**Testing Scrapy Setup:**")
-                scrapy_result = test_scrapy_setup()
-                
-                if scrapy_result.get("scrapy_working"):
-                    st.success("✅ Scrapy setup working")
-                    st.write(f"Spiders found: {scrapy_result['spiders_found']}")
-                else:
-                    st.error("❌ Scrapy setup failed")
-                    st.error(scrapy_result.get("error", UNKNOWN_ERROR))
-                    st.write(f"Working directory: {scrapy_result.get('working_dir')}")
-                    st.write(f"Command: {scrapy_result.get('command')}")
-        
         events = db.get_all_events()
         if events:
             df_export = pd.DataFrame(events)
