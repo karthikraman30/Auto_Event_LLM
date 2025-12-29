@@ -27,6 +27,42 @@ else:
 if not os.path.exists(VENV_PYTHON):
     VENV_PYTHON = sys.executable  # Fallback
 
+def test_scrapy_setup():
+    """Test if Scrapy project is properly configured."""
+    try:
+        import subprocess
+        import sys
+        
+        # Test if we can run scrapy list command
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        event_category_dir = os.path.join(base_dir, "event_category")
+        
+        cmd = [sys.executable, "-m", "scrapy", "list"]
+        
+        result = subprocess.run(
+            cmd, 
+            cwd=event_category_dir, 
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=os.environ.copy()
+        )
+        
+        return {
+            "scrapy_working": result.returncode == 0,
+            "spiders_found": result.stdout.strip().split('\n') if result.returncode == 0 else [],
+            "error": result.stderr if result.returncode != 0 else None,
+            "working_dir": event_category_dir,
+            "command": ' '.join(cmd)
+        }
+        
+    except Exception as e:
+        return {
+            "scrapy_working": False,
+            "error": str(e),
+            "working_dir": event_category_dir if 'event_category_dir' in locals() else "unknown"
+        }
+
 def test_basic_functionality():
     """Test basic functionality to isolate the issue."""
     try:
@@ -329,19 +365,34 @@ with tabs[0]:
         # Add debug test button
         if st.button("🔍 Debug Test", width='stretch'):
             with st.spinner("Running basic functionality test..."):
-                test_result = test_basic_functionality()
-                st.json(test_result)
+                # Test basic functionality
+                basic_result = test_basic_functionality()
+                st.json(basic_result)
                 
-                if test_result.get("database_working"):
+                if basic_result.get("database_working"):
                     st.success("✅ Database connection working")
-                    st.write(f"Found {test_result['enabled_urls_count']} enabled URLs")
-                    if test_result['urls']:
+                    st.write(f"Found {basic_result['enabled_urls_count']} enabled URLs")
+                    if basic_result['urls']:
                         st.write("Sample URLs:")
-                        for url in test_result['urls']:
+                        for url in basic_result['urls']:
                             st.write(f"- {url}")
                 else:
                     st.error("❌ Database connection failed")
-                    st.error(test_result.get("error", "Unknown error"))
+                    st.error(basic_result.get("error", "Unknown error"))
+                
+                # Test Scrapy setup
+                st.markdown("---")
+                st.write("**Testing Scrapy Setup:**")
+                scrapy_result = test_scrapy_setup()
+                
+                if scrapy_result.get("scrapy_working"):
+                    st.success("✅ Scrapy setup working")
+                    st.write(f"Spiders found: {scrapy_result['spiders_found']}")
+                else:
+                    st.error("❌ Scrapy setup failed")
+                    st.error(scrapy_result.get("error", "Unknown error"))
+                    st.write(f"Working directory: {scrapy_result.get('working_dir')}")
+                    st.write(f"Command: {scrapy_result.get('command')}")
         
         events = db.get_all_events()
         if events:
