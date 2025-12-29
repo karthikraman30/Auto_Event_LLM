@@ -31,9 +31,27 @@ if not os.path.exists(VENV_PYTHON):
 def test_direct_scraping():
     """Test direct scraping without subprocess."""
     try:
+        # Fix Python path for Streamlit Cloud
+        import sys
+        import os
+        
+        # Add all necessary paths to sys.path
+        current_dir = os.getcwd()
+        event_category_dir = os.path.join(current_dir, "event_category")
+        nested_event_dir = os.path.join(current_dir, "event_category", "event_category")
+        
+        # Add paths in order of preference
+        for path in [current_dir, event_category_dir, nested_event_dir]:
+            if path not in sys.path:
+                sys.path.insert(0, path)
+        
+        print(f"Python paths: {sys.path[:5]}")  # Debug first 5 paths
+        print(f"Current dir: {current_dir}")
+        print(f"Event category dir exists: {os.path.exists(event_category_dir)}")
+        print(f"Nested event dir exists: {os.path.exists(nested_event_dir)}")
+        
         # Import and test the main scraping function directly
         import importlib.util
-        import sys
         
         # Load run_parallel.py as a module
         spec = importlib.util.spec_from_file_location("run_parallel", RUN_PARALLEL_FILE)
@@ -83,12 +101,22 @@ def test_scrapy_setup():
     try:
         import subprocess
         import sys
+        import os
+        
+        # Fix Python path for Streamlit Cloud
+        current_dir = os.getcwd()
+        event_category_dir = os.path.join(current_dir, "event_category")
         
         # Test if we can run scrapy list command
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        event_category_dir = os.path.join(base_dir, "event_category")
-        
         cmd = [sys.executable, "-m", "scrapy", "list"]
+        
+        # Set up environment with correct Python path
+        env = os.environ.copy()
+        env['PYTHONPATH'] = event_category_dir
+        
+        print(f"Running scrapy in: {event_category_dir}")
+        print(f"Command: {' '.join(cmd)}")
+        print(f"PYTHONPATH: {env['PYTHONPATH']}")
         
         result = subprocess.run(
             cmd, 
@@ -96,7 +124,7 @@ def test_scrapy_setup():
             capture_output=True,
             text=True,
             timeout=30,
-            env=os.environ.copy()
+            env=env
         )
         
         return {
@@ -104,7 +132,8 @@ def test_scrapy_setup():
             "spiders_found": result.stdout.strip().split('\n') if result.returncode == 0 else [],
             "error": result.stderr if result.returncode != 0 else None,
             "working_dir": event_category_dir,
-            "command": ' '.join(cmd)
+            "command": ' '.join(cmd),
+            "python_path": env['PYTHONPATH']
         }
         
     except Exception as e:
