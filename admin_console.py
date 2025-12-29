@@ -493,6 +493,9 @@ with tabs[0]:
     if 'page' not in st.session_state:
         st.session_state.page = 1
     
+    if 'use_calendar_filter' not in st.session_state:
+        st.session_state.use_calendar_filter = False
+    
     # Row 1: Search, Venue, Source Website, Date Range
     filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
     
@@ -508,7 +511,15 @@ with tabs[0]:
         source = st.selectbox("Source Website", sources)
     
     with filter_col4:
-        date_range = st.selectbox("Date Range", ["Next 30 Days", "This Week", "All Time"])
+        filter_mode = st.selectbox("Filter By Date", ["Date Range", "Specific Date"])
+    
+    # Row 2: Date filters
+    if filter_mode == "Date Range":
+        date_range = st.selectbox("Date Range", ["Next 30 Days", "This Week", "All Time"], key="date_range_select")
+        filter_date = None
+    else:
+        date_range = "All Time"  # Not used in specific date mode
+        filter_date = st.date_input("Select Date", value=datetime.now())
     
     target_groups = st.multiselect("Target Group", options=["All", "Children", "Adults", "Families"], 
                                     default=["All"])
@@ -520,7 +531,8 @@ with tabs[0]:
     per_page = 20
     events_filtered, total_count = db.get_events_filtered(
         search=search, venue=venue, date_range=date_range, 
-        target_groups=target_groups, source=source, page=st.session_state.page, per_page=per_page
+        target_groups=target_groups, source=source, page=st.session_state.page, per_page=per_page,
+        filter_date=filter_date.strftime("%Y-%m-%d") if filter_date else None
     )
     
     total_pages = math.ceil(total_count / per_page) if total_count > 0 else 1
@@ -555,19 +567,10 @@ with tabs[0]:
     
     if events_filtered:
         for idx, event in enumerate(events_filtered):
-            # Format date for display (with optional end date)
+            # Format date for display
             try:
                 date_obj = datetime.strptime(event['date_iso'], "%Y-%m-%d")
                 display_date = date_obj.strftime("%d %b %Y")
-                
-                # Add end date if present
-                end_date = event.get('end_date_iso')
-                if end_date and end_date != 'N/A':
-                    try:
-                        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
-                        display_date += f" → {end_date_obj.strftime('%d %b %Y')}"
-                    except:
-                        pass
             except:
                 display_date = event['date_iso'] or "Date TBA"
             

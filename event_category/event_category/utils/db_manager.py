@@ -172,8 +172,8 @@ class DatabaseManager:
         return events
 
     def get_events_filtered(self, search="", venue="All Venues", date_range="All Time", 
-                            target_groups=None, source="All Sources", page=1, per_page=20):
-        """Get filtered and paginated events."""
+                            target_groups=None, source="All Sources", page=1, per_page=20, filter_date=None):
+        """Get filtered and paginated events. If filter_date is provided, show only events on that date."""
         conn = sqlite3.connect(self.db_path, timeout=30.0)
         cursor = conn.cursor()
         
@@ -200,7 +200,12 @@ class DatabaseManager:
                 params.append(f"%{domain}%")
         
         today = datetime.now().strftime("%Y-%m-%d")
-        if date_range == "This Week":
+        
+        # If filter_date is provided, show all events that occur on that date
+        if filter_date:
+            query += " AND date_iso <= ? AND (end_date_iso >= ? OR end_date_iso = 'N/A')"
+            params.extend([filter_date, filter_date])
+        elif date_range == "This Week":
             week_end = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
             query += " AND date_iso >= ? AND date_iso <= ?"
             params.extend([today, week_end])
@@ -230,9 +235,53 @@ class DatabaseManager:
         rows = cursor.fetchall()
         column_names = [description[0] for description in cursor.description]
         events = [dict(zip(column_names, row)) for row in rows]
+        
+        # Expand multi-day events
+        expanded_events = []
+        for event in events:
+            expanded_events.extend(self._expand_event_across_days(event))
+        
         conn.close()
         
-        return events, total
+        return expanded_events, total
+    
+    def _expand_event_across_days(self, event):
+        """Expand an event that spans multiple days into separate entries for each day."""
+        events = []
+        start_date_str = event.get('date_iso')
+        end_date_str = event.get('end_date_iso')
+        
+        if not start_date_str:
+            return [event]
+        
+        try:
+            start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+            
+            # If no end date or end date is 'N/A', just return single event
+            if not end_date_str or end_date_str == 'N/A':
+                return [event]
+            
+            end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+            
+            # If start and end are the same, return single event
+            if start_date == end_date:
+                return [event]
+            
+            # Generate event for each day in the range
+            current_date = start_date
+            while current_date <= end_date:
+                event_copy = event.copy()
+                event_copy['date_iso'] = current_date.strftime("%Y-%m-%d")
+                # Keep end_date as 'N/A' for expanded events to indicate they're single-day instances
+                event_copy['end_date_iso'] = 'N/A'
+                events.append(event_copy)
+                current_date += timedelta(days=1)
+            
+            return events
+            
+        except Exception as e:
+            print(f"Error expanding event: {e}")
+            return [event]
 
     def delete_old_events(self, days):
         """Delete events older than specified days."""
