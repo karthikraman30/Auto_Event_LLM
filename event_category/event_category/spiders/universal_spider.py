@@ -281,14 +281,34 @@ class MultiSiteEventSpider(scrapy.Spider):
     ]
 
     def configure_gemini(self):
-        """Initialize the Gemini Client using the new SDK."""
+        """Initialize the Gemini API using google.generativeai."""
         api_key = self.settings.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
         if not api_key:
             self.logger.error("GEMINI_API_KEY is missing! Set it in .env file.")
             return None
         
-        # [NEW] Return the Client object
-        return genai.Client(api_key=api_key)
+        # Configure the API key for google.generativeai
+        genai.configure(api_key=api_key)
+        
+        # Return a wrapper object that mimics the Client interface
+        class GeminiClient:
+            def __init__(self, api_key):
+                self.api_key = api_key
+                self.models = self
+            
+            def generate_content(self, model, contents, config=None):
+                """Generate content using genai.GenerativeModel"""
+                gen_model = genai.GenerativeModel(model)
+                response = gen_model.generate_content(
+                    contents,
+                    generation_config=genai.types.GenerationConfig(
+                        temperature=config.get('temperature', 0.1) if config else 0.1,
+                        response_mime_type=config.get('response_mime_type', 'text/plain') if config else 'text/plain'
+                    )
+                )
+                return response
+        
+        return GeminiClient(api_key)
 
     def start_requests(self):
         self.client = self.configure_gemini()
