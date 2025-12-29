@@ -8,6 +8,7 @@ import re
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 
 sys.path.append(os.path.join(os.getcwd(), "event_category"))
 from event_category.utils.db_manager import DatabaseManager
@@ -280,19 +281,39 @@ def setup_scheduler():
     """Initialize scheduler based on settings."""
     settings = db.get_all_settings()
     freq = settings.get("schedule_frequency", "weekly")
-    day = settings.get("schedule_day", "monday")
-    time_str = settings.get("schedule_time", "06:00")
-    hour, minute = map(int, time_str.split(":"))
     
     scheduler = BackgroundScheduler()
     
-    if freq == "daily":
-        scheduler.add_job(run_scheduled_scrape, CronTrigger(hour=hour, minute=minute))
-    else:  # weekly
-        day_map = {"monday": "mon", "tuesday": "tue", "wednesday": "wed", "thursday": "thu",
-                   "friday": "fri", "saturday": "sat", "sunday": "sun"}
-        scheduler.add_job(run_scheduled_scrape, CronTrigger(day_of_week=day_map.get(day, "mon"), 
-                                                            hour=hour, minute=minute))
+    if freq == "custom":
+        # Custom scheduling - convert to daily cron trigger at specific time
+        custom_datetime_str = settings.get("schedule_datetime")
+        if custom_datetime_str:
+            try:
+                custom_datetime = datetime.fromisoformat(custom_datetime_str)
+                # Extract hour and minute from custom datetime
+                hour = custom_datetime.hour
+                minute = custom_datetime.minute
+                # Use CronTrigger to run every day at the specified time (more reliable)
+                scheduler.add_job(run_scheduled_scrape, CronTrigger(hour=hour, minute=minute))
+                print(f"Scheduled custom scrape for every day at {hour:02d}:{minute:02d}")
+            except Exception as e:
+                print(f"Error parsing custom datetime: {e}")
+                # Fallback to weekly if custom datetime is invalid
+                freq = "weekly"
+    
+    if freq != "custom":
+        # Weekly or Daily scheduling
+        day = settings.get("schedule_day", "monday")
+        time_str = settings.get("schedule_time", "06:00")
+        hour, minute = map(int, time_str.split(":"))
+        
+        if freq == "daily":
+            scheduler.add_job(run_scheduled_scrape, CronTrigger(hour=hour, minute=minute))
+        else:  # weekly
+            day_map = {"monday": "mon", "tuesday": "tue", "wednesday": "wed", "thursday": "thu",
+                       "friday": "fri", "saturday": "sat", "sunday": "sun"}
+            scheduler.add_job(run_scheduled_scrape, CronTrigger(day_of_week=day_map.get(day, "mon"), 
+                                                                hour=hour, minute=minute))
     scheduler.start()
     return scheduler
 
@@ -617,40 +638,119 @@ with tabs[1]:
     current_freq = settings.get("schedule_frequency", "weekly")
     frequency = st.radio("Frequency", freq_options, index=freq_options.index(current_freq), horizontal=True)
     
-    sched_col1, sched_col2 = st.columns(2)
-    
-    days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-    current_day = settings.get("schedule_day", "monday")
-    with sched_col1:
-        schedule_day = st.selectbox("Day", days, index=days.index(current_day))
-    
-    times = [f"{h:02d}:00" for h in range(24)]
-    current_time = settings.get("schedule_time", "06:00")
-    with sched_col2:
-        schedule_time = st.selectbox("Time", times, index=times.index(current_time) if current_time in times else 6)
-    
-    # Calculate next scheduled run
-    today = datetime.now()
-    day_num = days.index(schedule_day)
-    days_ahead = day_num - today.weekday()
-    if days_ahead <= 0:
-        days_ahead += 7
-    next_run_date = today + timedelta(days=days_ahead)
-    hour = int(schedule_time.split(":")[0])
-    next_run = next_run_date.replace(hour=hour, minute=0, second=0)
-    st.caption(f"**Next scheduled run:** {next_run.strftime('%A, %b %d, %Y at %H:%M')}")
+    # Show different options based on frequency
+    if frequency == "custom":
+        st.info("📅 Set a specific date and time for the next scheduled scrape")
+        
+        custom_col1, custom_col2 = st.columns(2)
+        with custom_col1:
+            custom_date = st.date_input("Select Date", value=datetime.now().date())
+        with custom_col2:
+            # Use text input for manual time entry in HH:MM format
+            current_time_str = settings.get("schedule_time", "06:00")
+            custom_time_str = st.text_input("Enter Time (HH:MM)", value=current_time_str, placeholder="e.g. 14:30")
+            
+            # Parse the time string
+            try:
+                time_parts = custom_time_str.split(":")
+                custom_time = datetime.strptime(custom_time_str, "%H:%M").time()
+            except:
+                st.warning("⚠️ Invalid time format. Use HH:MM (e.g., 14:30)")
+                custom_time = datetime.now().time()
+        
+        # Combine date and time
+        custom_datetime = datetime.combine(custom_date, custom_time)
+        st.caption(f"**Scheduled run:** {custom_datetime.strftime('%A, %b %d, %Y at %H:%M')}")
+        
+        schedule_day = None  # Not used for custom
+        schedule_time = None  # Not used for custom
+        
+    elif frequency == "daily":
+        st.info("⏰ Scraping will run every day at the specified time")
+        
+        # Only show time picker for daily
+        current_time_str = settings.get("schedule_time", "06:00")
+        try:
+            current_time_obj = datetime.strptime(current_time_str, "%H:%M").time()
+        except:
+            current_time_obj = datetime.strptime("06:00", "%H:%M").time()
+        
+        schedule_time_input = st.time_input("Select Time", value=current_time_obj)
+        schedule_time = f"{schedule_time_input.hour:02d}:{schedule_time_input.minute:02d}"
+        
+        # Display next scheduled run
+        today = datetime.now()
+        next_run = today.replace(hour=schedule_time_input.hour, minute=schedule_time_input.minute, second=0)
+        if next_run <= today:
+            next_run += timedelta(days=1)
+        st.caption(f"**Next scheduled run:** {next_run.strftime('%A, %b %d, %Y at %H:%M')}")
+        
+        schedule_day = None  # Not used for daily
+        custom_datetime = None
+        
+    else:  # weekly
+        st.info("📆 Scraping will run on the selected day and time each week")
+        
+        sched_col1, sched_col2 = st.columns(2)
+        
+        days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+        current_day = settings.get("schedule_day", "monday")
+        with sched_col1:
+            schedule_day = st.selectbox("Day", days, index=days.index(current_day))
+        
+        current_time_str = settings.get("schedule_time", "06:00")
+        try:
+            current_time_obj = datetime.strptime(current_time_str, "%H:%M").time()
+        except:
+            current_time_obj = datetime.strptime("06:00", "%H:%M").time()
+        
+        with sched_col2:
+            schedule_time_input = st.time_input("Select Time", value=current_time_obj)
+            schedule_time = f"{schedule_time_input.hour:02d}:{schedule_time_input.minute:02d}"
+        
+        # Calculate next scheduled run
+        today = datetime.now()
+        day_num = days.index(schedule_day)
+        days_ahead = day_num - today.weekday()
+        if days_ahead <= 0:
+            days_ahead += 7
+        next_run_date = today + timedelta(days=days_ahead)
+        next_run = next_run_date.replace(hour=schedule_time_input.hour, minute=schedule_time_input.minute, second=0)
+        st.caption(f"**Next scheduled run:** {next_run.strftime('%A, %b %d, %Y at %H:%M')}")
+        
+        custom_datetime = None
     
     if st.button("💾 Save Schedule"):
-        db.save_settings({
-            "schedule_frequency": frequency,
-            "schedule_day": schedule_day,
-            "schedule_time": schedule_time
-        })
-        st.success("Schedule saved!")
-        # Restart scheduler
-        if st.session_state.scheduler:
-            st.session_state.scheduler.shutdown(wait=False)
-        st.session_state.scheduler = setup_scheduler()
+        if frequency == "custom":
+            # Validate custom datetime is in the future
+            now = datetime.now()
+            if custom_datetime <= now:
+                st.error(f"❌ Error: Scheduled time must be in the future! Current time is {now.strftime('%Y-%m-%d %H:%M')}. Please select a time after this.")
+            else:
+                # Save custom datetime
+                db.save_settings({
+                    "schedule_frequency": frequency,
+                    "schedule_datetime": custom_datetime.isoformat()
+                })
+                st.success(f"Schedule saved! Scraping will run at {custom_datetime.strftime('%A, %b %d, %Y at %H:%M')}")
+                
+                # Restart scheduler
+                if st.session_state.scheduler:
+                    st.session_state.scheduler.shutdown(wait=False)
+                st.session_state.scheduler = setup_scheduler()
+        else:
+            # Save weekly/daily schedule
+            db.save_settings({
+                "schedule_frequency": frequency,
+                "schedule_day": schedule_day,
+                "schedule_time": schedule_time
+            })
+            st.success("Schedule saved!")
+            
+            # Restart scheduler
+            if st.session_state.scheduler:
+                st.session_state.scheduler.shutdown(wait=False)
+            st.session_state.scheduler = setup_scheduler()
     
     # --- ACTIVE VENUES ---
     st.markdown("---")
@@ -787,8 +887,14 @@ with tabs[2]:
         for log in logs:
             timestamp = log["timestamp"]
             try:
+                # Parse timestamp and convert to IST (UTC+5:30)
                 dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
-                date_display = dt.strftime("%b %d %H:%M")
+                # Assume timestamp is in UTC, convert to IST
+                from datetime import timezone, timedelta as td
+                ist_offset = td(hours=5, minutes=30)
+                dt_utc = dt.replace(tzinfo=timezone.utc)
+                dt_ist = dt_utc.astimezone(timezone(ist_offset))
+                date_display = dt_ist.strftime("%b %d %H:%M")
             except:
                 date_display = timestamp
             
@@ -810,8 +916,13 @@ with tabs[2]:
         for log in logs:
             if log.get("warnings") and log["status"] != "OK":
                 try:
+                    # Convert to IST for warning display as well
                     dt = datetime.strptime(log["timestamp"], "%Y-%m-%d %H:%M:%S")
-                    date_display = dt.strftime("%b %d, %Y")
+                    from datetime import timezone, timedelta as td
+                    ist_offset = td(hours=5, minutes=30)
+                    dt_utc = dt.replace(tzinfo=timezone.utc)
+                    dt_ist = dt_utc.astimezone(timezone(ist_offset))
+                    date_display = dt_ist.strftime("%b %d, %Y")
                 except:
                     date_display = log["timestamp"]
                 
