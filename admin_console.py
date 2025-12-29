@@ -194,21 +194,28 @@ def scrape_directly():
 
 def get_subprocess_env():
     """
-    Create environment dict for subprocess, injecting secrets from Streamlit
-    if available, otherwise using system environment.
+    Create environment dict for subprocess, injecting secrets and
+    setting the PYTHONPATH so modules can be found in deployment.
     """
     env = os.environ.copy()
     
-    # Inject secrets from st.secrets if available (Streamlit Cloud)
-    # We check for specific keys we know the scraper needs
-    sensitive_keys = ["GEMINI_API_KEY"]
+    # --- FIX: Set the Python Path for the Subprocess ---
+    current_dir = os.getcwd()
+    # This points to the folder containing the 'event_category' package
+    event_category_dir = os.path.join(current_dir, "event_category")
     
+    if "PYTHONPATH" in env:
+        env["PYTHONPATH"] = f"{current_dir}{os.pathsep}{event_category_dir}{os.pathsep}{env['PYTHONPATH']}"
+    else:
+        env["PYTHONPATH"] = f"{current_dir}{os.pathsep}{event_category_dir}"
+
+    # --- Existing Secret Injection ---
+    sensitive_keys = ["GEMINI_API_KEY"]
     try:
         if hasattr(st, "secrets"):
             for key in sensitive_keys:
                 if key in st.secrets:
                     env[key] = st.secrets[key]
-                # Also check inside "general" or "env" sections if people organize secrets that way
                 elif "env" in st.secrets and key in st.secrets["env"]:
                     env[key] = st.secrets["env"][key]
     except Exception as e:
