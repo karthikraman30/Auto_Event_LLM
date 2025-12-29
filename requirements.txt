@@ -60,3 +60,6 @@ zope.interface==8.1.1
 apscheduler==3.11.2
 streamlit==1.52.2
 python-dotenv==1.0.0
+google-generativeai==0.3.1
+cloudscraper==1.2.71
+beautifulsoup4==4.12.3
