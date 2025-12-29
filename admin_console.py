@@ -12,6 +12,17 @@ from apscheduler.triggers.cron import CronTrigger
 sys.path.append(os.path.join(os.getcwd(), "event_category"))
 from event_category.utils.db_manager import DatabaseManager
 
+# --- FIX: Add Python path at module level for Streamlit Cloud ---
+# This ensures all functions can find the event_category modules
+current_dir = os.getcwd()
+event_category_dir = os.path.join(current_dir, "event_category")
+nested_event_dir = os.path.join(current_dir, "event_category", "event_category")
+
+# Add paths to sys.path at module level
+for path in [current_dir, event_category_dir, nested_event_dir]:
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
 # --- CONSTANTS ---
 RUN_PARALLEL_FILE = "run_parallel.py"
 UNKNOWN_ERROR = "Unknown error"
@@ -31,11 +42,11 @@ if not os.path.exists(VENV_PYTHON):
 def test_direct_scraping():
     """Test direct scraping without subprocess."""
     try:
-        # Fix Python path for Streamlit Cloud
+        # Fix Python path for Streamlit Cloud - same fix as get_subprocess_env
         import sys
         import os
         
-        # Add all necessary paths to sys.path
+        # Add all necessary paths to sys.path - same as subprocess fix
         current_dir = os.getcwd()
         event_category_dir = os.path.join(current_dir, "event_category")
         nested_event_dir = os.path.join(current_dir, "event_category", "event_category")
