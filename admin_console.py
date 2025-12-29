@@ -78,9 +78,13 @@ def test_direct_scraping():
         env = os.environ.copy()
         
         # Add secrets if available
-        if hasattr(st, "secrets"):
-            if "GEMINI_API_KEY" in st.secrets:
+        # Note: st.secrets might not be available in all contexts
+        try:
+            import streamlit as st
+            if hasattr(st, "secrets") and "GEMINI_API_KEY" in st.secrets:
                 env["GEMINI_API_KEY"] = st.secrets["GEMINI_API_KEY"]
+        except ImportError:
+            pass  # Streamlit not available in this context
         
         return {
             "direct_scraping_working": True,
