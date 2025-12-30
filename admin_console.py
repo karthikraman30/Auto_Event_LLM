@@ -5,6 +5,7 @@ import sys
 import math
 import subprocess
 import re
+import json
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -345,7 +346,7 @@ if 'scheduler' not in st.session_state:
 st.title("🎭 Event Scraper Admin Console")
 
 # --- TABS ---
-tabs = st.tabs(["📊 Dashboard", "⚙️ Settings", "📝 Logs", "📈 Analytics"])
+tabs = st.tabs(["📊 Dashboard", "⚙️ Settings", "📝 Logs", "📈 Analytics", "🎯 Selectors"])
 
 # =============================================================================
 # TAB 1: DASHBOARD
@@ -535,7 +536,7 @@ with tabs[0]:
     
     events_filtered, total_count = db.get_events_filtered(
         search=search, venue=venue, date_range=date_range, 
-        target_groups=target_groups, source=source, page=st.session_state.page, per_page=db_per_page,
+        target_groups=target_groups, source=source, page=st.session_state.page, per_page=per_page,
         filter_date=filter_date.strftime("%Y-%m-%d") if filter_date else None
     )
     
@@ -1078,3 +1079,244 @@ with tabs[3]:
         st.area_chart(timeline_df.set_index("week")["count"])
     else:
         st.info("No timeline data available.")
+
+# =============================================================================
+# TAB 5: SELECTORS
+# =============================================================================
+with tabs[4]:
+    st.markdown("---")
+    st.subheader("🎯 SELECTOR MANAGEMENT")
+    st.markdown("Manage CSS selectors for event extraction without running the spider.")
+    
+    # Get all selector configurations from database
+    try:
+        all_selectors = db.get_all_selector_configs()
+    except Exception as e:
+        st.error(f"Error loading selectors: {str(e)}")
+        all_selectors = []
+    
+    if not all_selectors:
+        st.info("No selector configurations found. Selectors will be auto-saved when scraping new URLs.")
+    else:
+        # Display existing selectors
+        st.markdown("---")
+        st.subheader(f"📋 CONFIGURED SELECTORS ({len(all_selectors)} URLs)")
+        
+        # Create tabs for each selector or a single view with columns
+        for idx, selector_config in enumerate(all_selectors):
+            domain = selector_config.get('domain', 'Unknown')
+            url_pattern = selector_config.get('url_pattern', '')
+            container_sel = selector_config.get('container_selector', '')
+            item_sels_json = selector_config.get('item_selectors_json', '{}')
+            last_updated = selector_config.get('last_updated', 'Unknown')
+            
+            # Parse item selectors
+            try:
+                item_sels = json.loads(item_sels_json) if isinstance(item_sels_json, str) else item_sels_json
+            except Exception as e:
+                st.error(f"Error parsing selectors: {e}")
+                item_sels = {}
+            
+            # Create collapsible card for each selector config
+            with st.expander(f"🌐 {domain} — {url_pattern or '/'}", expanded=False):
+                # Display current selectors in a table format
+                st.markdown("**Current Selectors:**")
+                
+                # Create a more readable display for selectors
+                if item_sels:
+                    # Display Container selector first
+                    st.markdown(f"**Container:** `{container_sel}`")
+                    
+                    # Display each field selector with better formatting
+                    st.markdown("**Field Selectors:**")
+                    for field_name, field_selector in item_sels.items():
+                        # Format field name for display (replace underscores with spaces and title case)
+                        display_name = field_name.replace('_', ' ').title()
+                        st.markdown(f"• **{display_name}**: `{field_selector}`")
+                else:
+                    st.markdown(f"**Container:** `{container_sel}`")
+                    st.info("No item selectors configured yet.")
+                
+                st.caption(f"Last updated: {last_updated}")
+                
+                # Edit button
+                st.markdown("**Edit Selectors:**")
+                
+                edit_col1, edit_col2 = st.columns(2)
+                
+                with edit_col1:
+                    if st.button(f"✏️ Edit Field-by-Field", key=f"edit_fields_{idx}"):
+                        st.session_state[f"editing_{idx}"] = "fields"
+                
+                with edit_col2:
+                    if st.button(f"📝 Edit as JSON", key=f"edit_json_{idx}"):
+                        st.session_state[f"editing_{idx}"] = "json"
+                
+                # Show edit interface based on mode
+                if st.session_state.get(f"editing_{idx}") == "fields":
+                    st.markdown("**Field-by-Field Editor:**")
+                    
+                    # Create form for editing
+                    with st.form(f"edit_form_fields_{idx}"):
+                        new_container = st.text_input(
+                            "Container Selector",
+                            value=container_sel,
+                            help="CSS selector for the container element holding events"
+                        )
+                        
+                        # Create inputs for each item selector
+                        new_items = {}
+                        for field_name, field_selector in item_sels.items():
+                            # Format field name for display (replace underscores with spaces and title case)
+                            display_name = field_name.replace('_', ' ').title()
+                            new_items[field_name] = st.text_input(
+                                f"{display_name} Selector",
+                                value=field_selector,
+                                help=f"CSS selector for extracting {field_name}"
+                            )
+                        
+                        # Form buttons
+                        form_col1, form_col2 = st.columns(2)
+                        
+                        with form_col1:
+                            save_changes = st.form_submit_button("💾 Save Changes")
+                        
+                        with form_col2:
+                            if st.form_submit_button("❌ Cancel"):
+                                st.session_state[f"editing_{idx}"] = None
+                                st.rerun()
+                        
+                        if save_changes:
+                            try:
+                                # Save selectors to database
+                                full_url = f"https://{domain}{url_pattern}" if url_pattern else f"https://{domain}"
+                                db.save_selectors(full_url, new_container, new_items)
+                                st.success("✅ Selectors saved successfully!")
+                                st.session_state[f"editing_{idx}"] = None
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error saving selectors: {str(e)}")
+                
+                elif st.session_state.get(f"editing_{idx}") == "json":
+                    st.markdown("**JSON Editor:**")
+                    st.info("Edit the complete selector configuration as JSON. Paste updated config and save.")
+                    
+                    # Create JSON object for editing
+                    edit_config = {
+                        "container_selector": container_sel,
+                        "item_selectors": item_sels
+                    }
+                    
+                    with st.form(f"edit_form_json_{idx}"):
+                        json_text = st.text_area(
+                            "Selector Configuration (JSON)",
+                            value=json.dumps(edit_config, indent=2),
+                            height=200,
+                            help="Edit the JSON configuration directly"
+                        )
+                        
+                        # Form buttons
+                        form_col1, form_col2 = st.columns(2)
+                        
+                        with form_col1:
+                            save_json = st.form_submit_button("💾 Save Changes")
+                        
+                        with form_col2:
+                            if st.form_submit_button("❌ Cancel"):
+                                st.session_state[f"editing_{idx}"] = None
+                                st.rerun()
+                        
+                        if save_json:
+                            try:
+                                # Parse JSON
+                                parsed_config = json.loads(json_text)
+                                new_container = parsed_config.get("container_selector", "")
+                                new_items = parsed_config.get("item_selectors", {})
+                                
+                                # Validate JSON structure
+                                if not new_container or not isinstance(new_items, dict):
+                                    st.error("Invalid JSON structure. Must have 'container_selector' (string) and 'item_selectors' (object).")
+                                else:
+                                    # Save selectors to database
+                                    full_url = f"https://{domain}{url_pattern}" if url_pattern else f"https://{domain}"
+                                    db.save_selectors(full_url, new_container, new_items)
+                                    st.success("✅ Selectors saved successfully!")
+                                    st.session_state[f"editing_{idx}"] = None
+                                    st.rerun()
+                            except json.JSONDecodeError as e:
+                                st.error(f"Invalid JSON: {str(e)}")
+                            except Exception as e:
+                                st.error(f"Error saving selectors: {str(e)}")
+                
+                # Delete button at the bottom
+                st.markdown("---")
+                if st.button(f"🗑️ Delete Selectors", key=f"delete_{idx}", help="Remove this selector configuration"):
+                    try:
+                        full_url = f"https://{domain}{url_pattern}" if url_pattern else f"https://{domain}"
+                        db.delete_selector_config(full_url)
+                        st.success(f"✅ Deleted selectors for {domain}")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error deleting selectors: {str(e)}")
+    
+    # Add new selector section
+    st.markdown("---")
+    st.subheader("➕ ADD NEW SELECTOR")
+    
+    with st.expander("Add Selectors for a New URL", expanded=False):
+        st.info("Use this form to add selectors for a new URL without running the spider.")
+        
+        with st.form("add_selector_form"):
+            new_url = st.text_input(
+                "URL",
+                placeholder="https://example.com/events",
+                help="Full URL pattern for the website"
+            )
+            
+            new_container = st.text_input(
+                "Container Selector",
+                placeholder=".event-item, article.event, div.event-card",
+                help="CSS selector for the container element holding events"
+            )
+            
+            st.markdown("**Item Selectors** (fields to extract from each event):")
+            
+            item_selector_fields = {
+                "event_name": "Event Name",
+                "date_iso": "Date",
+                "time": "Time",
+                "location": "Location",
+                "description": "Description",
+                "booking_info": "Booking Info",
+                "target_group": "Target Group",
+                "status": "Status"
+            }
+            
+            new_items = {}
+            for field_key, field_label in item_selector_fields.items():
+                new_items[field_key] = st.text_input(
+                    f"{field_label} Selector",
+                    placeholder=f"CSS selector for {field_key}",
+                    help=f"Selector to extract {field_key}"
+                )
+            
+            # Submit button
+            add_submit = st.form_submit_button("➕ Add Selector Configuration")
+            
+            if add_submit:
+                # Validate inputs
+                if not new_url or not new_container:
+                    st.error("URL and Container Selector are required.")
+                elif not any(new_items.values()):
+                    st.error("At least one Item Selector is required.")
+                else:
+                    try:
+                        # Filter out empty selectors
+                        filtered_items = {k: v for k, v in new_items.items() if v}
+                        
+                        # Save to database
+                        db.save_selectors(new_url, new_container, filtered_items)
+                        st.success(f"✅ Selector configuration added for {new_url}")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error adding selector: {str(e)}")

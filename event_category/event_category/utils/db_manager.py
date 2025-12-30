@@ -5,23 +5,32 @@ from datetime import datetime, timedelta
 
 class DatabaseManager:
     def __init__(self, db_path="selectors.db"):
+        # Compute absolute path to project root's selectors.db
+        # db_manager.py is at: event_category/event_category/utils/db_manager.py
+        # Project root is 3 levels up
+        this_file_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.normpath(os.path.join(this_file_dir, "..", "..", ".."))
+        project_root_db = os.path.join(project_root, "selectors.db")
+        
         # Try multiple locations for production compatibility (Streamlit Cloud etc.)
         possible_paths = [
+            project_root_db,  # Always prefer project root first
             db_path,
             "event_category/selectors.db",
-            os.path.join(os.path.dirname(__file__), "..", "selectors.db"),  # Relative to this file
-            os.path.join(os.path.dirname(__file__), "..", "..", "selectors.db"),
+            os.path.join(this_file_dir, "..", "selectors.db"),  # Relative to this file
+            os.path.join(this_file_dir, "..", "..", "selectors.db"),
             "/mount/src/auto_event_llm/selectors.db",  # Streamlit Cloud absolute
             "/mount/src/auto_event_llm/event_category/selectors.db",
         ]
         
-        self.db_path = db_path  # Default fallback
+        self.db_path = project_root_db  # Default to project root
         for path in possible_paths:
             if path and os.path.exists(path):
-                self.db_path = path
+                self.db_path = os.path.abspath(path)  # Always use absolute path
                 break
         
         self._init_db()
+
 
     def _init_db(self):
         conn = sqlite3.connect(self.db_path, timeout=30.0)
@@ -653,6 +662,52 @@ class DatabaseManager:
                 item_selectors_json = excluded.item_selectors_json,
                 last_updated = CURRENT_TIMESTAMP
         ''', (domain, url_pattern, container_selector, json.dumps(item_selectors)))
+        
+        conn.commit()
+        conn.close()
+
+    def get_all_selector_configs(self):
+        """Get all selector configurations from the database."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT domain, url_pattern, container_selector, item_selectors_json, last_updated
+            FROM selector_configs
+            ORDER BY last_updated DESC
+        ''')
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        result = []
+        for row in rows:
+            result.append({
+                'domain': row['domain'],
+                'url_pattern': row['url_pattern'],
+                'container_selector': row['container_selector'],
+                'item_selectors_json': row['item_selectors_json'],
+                'last_updated': row['last_updated']
+            })
+        
+        return result
+
+    def delete_selector_config(self, url):
+        """Delete selector configuration for a URL."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        
+        # Extract domain and path from URL
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        domain = parsed.netloc.replace("www.", "")
+        url_pattern = parsed.path
+        
+        cursor.execute('''
+            DELETE FROM selector_configs
+            WHERE domain = ? AND url_pattern = ?
+        ''', (domain, url_pattern))
         
         conn.commit()
         conn.close()

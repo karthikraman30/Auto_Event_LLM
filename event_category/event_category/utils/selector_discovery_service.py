@@ -192,8 +192,8 @@ class SelectorDiscoveryService:
         selectors = discovery_result['selectors']
         confidence = discovery_result.get('confidence', 0.0)
         
-        # Step 2: Save to database (only if confidence > 0.5)
-        if confidence > 0.5:
+        # Step 2: Save to database (only if confidence > 0.3) - TEMPORARILY LOWERED
+        if confidence > 0.3:
             saved = self.save_selectors_to_db(url, selectors, confidence)
             discovery_result['saved'] = saved
         else:

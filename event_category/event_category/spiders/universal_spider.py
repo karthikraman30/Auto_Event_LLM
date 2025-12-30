@@ -12,6 +12,8 @@ from event_category.utils.db_manager import DatabaseManager
 from event_category.utils.auto_selector_discovery import EventScraperOrchestrator
 # [NEW] For Selector Discovery Service (AI-based)
 from event_category.utils.selector_discovery_service import SelectorDiscoveryService
+# [NEW] For generic pagination handler
+from event_category.utils.pagination_handler import PaginationHandler
 # [NEW] For Cloudflare bypass (Tekniska museet)
 import cloudscraper
 from bs4 import BeautifulSoup
@@ -314,10 +316,11 @@ class MultiSiteEventSpider(scrapy.Spider):
         self.client = self.configure_gemini()
         self.db = DatabaseManager()
         
-        # [NEW] Initialize Auto Selector Discovery Orchestrator
+        # [NEW] Initialize Auto Selector Discovery Orchestrator with DB manager
         self.orchestrator = EventScraperOrchestrator(
             ai_client=self.client,
-            logger=self.logger
+            logger=self.logger,
+            db_manager=self.db  # Pass DB manager for selector saving
         )
         
         if not self.client:
@@ -376,6 +379,27 @@ class MultiSiteEventSpider(scrapy.Spider):
                 await cookie_btns.first.click(force=True, timeout=2000)
                 await page.wait_for_timeout(1000)
         except: pass
+
+        # === STEP A.5: GENERIC PAGINATION FOR NEW SITES ===
+        # This runs BEFORE site-specific handlers
+        # Only applies to NEW/UNKNOWN sites (not Skansen, Tekniska, Moderna, Armemuseum)
+        is_known_site = any([
+            "skansen.se" in response.url,
+            "tekniskamuseet.se" in response.url,
+            "modernamuseet.se" in response.url,
+            "armemuseum.se" in response.url
+        ])
+        
+        if not is_known_site:
+            self.logger.info("NEW SITE: Applying generic pagination handler...")
+            try:
+                pagination_handler = PaginationHandler(self.logger)
+                pagination_count = await pagination_handler.handle_pagination(page)
+                if pagination_count > 0:
+                    self.logger.info(f"✅ Pagination complete: {pagination_count} actions performed")
+                    await page.wait_for_timeout(1000)  # Wait after final pagination
+            except Exception as e:
+                self.logger.warning(f"Pagination error: {e}")
 
         if "skansen.se" in response.url:
             self.logger.info("Detected Skansen. Using Day-by-Day Crawling Strategy.")
@@ -535,36 +559,12 @@ class MultiSiteEventSpider(scrapy.Spider):
                     self.logger.warning(f"Error navigating to next day: {e}")
                     break
             
-            # [NEW] AI FALLBACK: If no events extracted, try AI
+            # No AI fallback - selector-only approach
             if len(event_buffer) == 0:
-                self.logger.warning("Skansen: No events extracted with selectors. Trying AI fallback...")
-                try:
-                    page_text = await page.inner_text("body")
-                    page_text = re.sub(r'\s+', ' ', page_text).strip()[:8000]  # Limit text size
-                    ai_result = self.call_ai_engine(page_text, include_selectors=False)
-                    if ai_result:
-                        events_list = ai_result if isinstance(ai_result, list) else ai_result.get('events', [])
-                        for event_data in events_list:
-                            item = EventCategoryItem()
-                            item['event_name'] = event_data.get('event_name', 'Unknown')
-                            item['event_url'] = response.url
-                            item['date_iso'] = event_data.get('date_iso', '')
-                            item['date'] = event_data.get('date_iso', '')
-                            item['end_date_iso'] = event_data.get('end_date_iso', 'N/A')
-                            item['time'] = event_data.get('time', 'N/A')
-                            item['description'] = event_data.get('description', 'N/A')
-                            item['location'] = event_data.get('location', 'Skansen')
-                            item['target_group'] = event_data.get('target_group', 'All')
-                            item['target_group_normalized'] = self.simple_normalize(event_data.get('target_group', 'All'))
-                            item['status'] = event_data.get('status', 'scheduled')
-                            item['booking_info'] = 'N/A'
-                            self.logger.info(f"  [AI] -> {item['event_name']}: {item['date_iso']}")
-                            yield item
-                        self.logger.info(f"Skansen AI fallback extracted {len(events_list)} events.")
-                except Exception as e:
-                    self.logger.error(f"Skansen AI fallback failed: {e}")
-                await page.close()
-                return
+                self.logger.warning("Skansen: No events extracted with selectors. Manual selector input required.")
+            
+            await page.close()
+            return
             
             # [NEW] CONSOLIDATION: Yield unique events with start/end dates
             self.logger.info(f"Consolidating {len(event_buffer)} unique Skansen events...")
@@ -776,34 +776,11 @@ class MultiSiteEventSpider(scrapy.Spider):
                     self.logger.warning(f"Error extracting Tekniska event: {e}")
                     continue
             
-            # [NEW] AI FALLBACK: If no events extracted, try AI
+            # No AI fallback - selector-only approach
             if len(events) == 0:
-                self.logger.warning("Tekniska: No events found with selectors. Trying AI fallback...")
-                try:
-                    # Use already-fetched HTML from cloudscraper
-                    page_text = soup.get_text(separator=' ', strip=True)[:8000]
-                    ai_result = self.call_ai_engine(page_text, include_selectors=False)
-                    if ai_result:
-                        events_list = ai_result if isinstance(ai_result, list) else ai_result.get('events', [])
-                        for event_data in events_list:
-                            item = EventCategoryItem()
-                            item['event_name'] = event_data.get('event_name', 'Unknown')
-                            item['event_url'] = response.url
-                            item['date_iso'] = event_data.get('date_iso', '')
-                            item['date'] = event_data.get('date_iso', '')
-                            item['end_date_iso'] = event_data.get('end_date_iso', 'N/A')
-                            item['time'] = event_data.get('time', 'N/A')
-                            item['description'] = event_data.get('description', 'N/A')
-                            item['location'] = event_data.get('location', 'Tekniska museet')
-                            item['target_group'] = event_data.get('target_group', 'All')
-                            item['target_group_normalized'] = self.simple_normalize(event_data.get('target_group', 'All'))
-                            item['status'] = event_data.get('status', 'scheduled')
-                            item['booking_info'] = 'N/A'
-                            self.logger.info(f"  [AI] -> {item['event_name']}: {item['date_iso']}")
-                            yield item
-                        self.logger.info(f"Tekniska AI fallback extracted {len(events_list)} events.")
-                except Exception as e:
-                    self.logger.error(f"Tekniska AI fallback failed: {e}")
+                self.logger.warning("Tekniska: No events found with selectors. Manual selector input required.")
+            
+            return  # Exit after Tekniska handler
             
             return  # Exit after Tekniska handler
         
@@ -944,34 +921,12 @@ class MultiSiteEventSpider(scrapy.Spider):
 
             self.logger.info(f"Moderna Museet: Extracted {extracted_count} events.")
             
-            # [NEW] AI FALLBACK: If no events extracted, try AI
+            # No AI fallback - selector-only approach
             if extracted_count == 0:
-                self.logger.warning("Moderna: No events extracted with selectors. Trying AI fallback...")
-                try:
-                    page_text = await page.inner_text("body")
-                    page_text = re.sub(r'\s+', ' ', page_text).strip()[:8000]
-                    ai_result = self.call_ai_engine(page_text, include_selectors=False)
-                    if ai_result:
-                        events_list = ai_result if isinstance(ai_result, list) else ai_result.get('events', [])
-                        for event_data in events_list:
-                            item = EventCategoryItem()
-                            item['event_name'] = event_data.get('event_name', 'Unknown')
-                            item['event_url'] = response.url
-                            item['date_iso'] = event_data.get('date_iso', '')
-                            item['date'] = event_data.get('date_iso', '')
-                            item['end_date_iso'] = event_data.get('end_date_iso', 'N/A')
-                            item['time'] = event_data.get('time', 'N/A')
-                            item['description'] = event_data.get('description', 'N/A')
-                            item['location'] = event_data.get('location', 'Moderna Museet')
-                            item['target_group'] = event_data.get('target_group', 'All')
-                            item['target_group_normalized'] = self.simple_normalize(event_data.get('target_group', 'All'))
-                            item['status'] = event_data.get('status', 'scheduled')
-                            item['booking_info'] = 'N/A'
-                            self.logger.info(f"  [AI] -> {item['event_name']}: {item['date_iso']}")
-                            yield item
-                        self.logger.info(f"Moderna AI fallback extracted {len(events_list)} events.")
-                except Exception as e:
-                    self.logger.error(f"Moderna AI fallback failed: {e}")
+                self.logger.warning("Moderna: No events extracted with selectors. Manual selector input required.")
+            
+            await page.close()
+            return
             
             await page.close()
             return
@@ -1136,6 +1091,7 @@ class MultiSiteEventSpider(scrapy.Spider):
                 yield scrapy.Request(
                     event_url,
                     callback=self.parse_details,
+                    dont_filter=True,  # [NEW] Allow recurring events with same URL but different dates
                     meta={
                         'playwright': True,
                         'playwright_include_page': True,
@@ -1151,39 +1107,70 @@ class MultiSiteEventSpider(scrapy.Spider):
                     }
                 )
             
-            # [NEW] AI FALLBACK: If no event cards found, try AI
+            # No AI fallback - selector-only approach
             if len(event_cards) == 0:
-                self.logger.warning("Armemuseum: No event cards found. Trying AI fallback...")
-                try:
-                    page_text = await page.inner_text("body")
-                    page_text = re.sub(r'\s+', ' ', page_text).strip()[:8000]
-                    ai_result = self.call_ai_engine(page_text, include_selectors=False)
-                    if ai_result:
-                        events_list = ai_result if isinstance(ai_result, list) else ai_result.get('events', [])
-                        for event_data in events_list:
-                            item = EventCategoryItem()
-                            item['event_name'] = event_data.get('event_name', 'Unknown')
-                            item['event_url'] = response.url
-                            item['date_iso'] = event_data.get('date_iso', '')
-                            item['date'] = event_data.get('date_iso', '')
-                            item['end_date_iso'] = event_data.get('end_date_iso', 'N/A')
-                            item['time'] = event_data.get('time', 'N/A')
-                            item['description'] = event_data.get('description', 'N/A')
-                            item['location'] = event_data.get('location', 'Armémuseum')
-                            item['target_group'] = event_data.get('target_group', 'All')
-                            item['target_group_normalized'] = self.simple_normalize(event_data.get('target_group', 'All'))
-                            item['status'] = event_data.get('status', 'scheduled')
-                            item['booking_info'] = 'N/A'
-                            self.logger.info(f"  [AI] -> {item['event_name']}: {item['date_iso']}")
-                            yield item
-                        self.logger.info(f"Armemuseum AI fallback extracted {len(events_list)} events.")
-                except Exception as e:
-                    self.logger.error(f"Armemuseum AI fallback failed: {e}")
+                self.logger.warning("Armemuseum: No event cards found. Manual selector input required.")
+            
+            # Close page and return (skip generic logic)
+            await page.close()
+            return
             
             # Close page and return (skip generic logic)
             await page.close()
             return
 
+        # === STEP C: PAGINATION HANDLING (LOAD MORE BUTTONS) ===
+        # IMPORTANT: This must happen BEFORE extraction to load ALL events first
+        # Some sites (e.g., National Museum) use "Load More" or "Visa mer" buttons to dynamically load events
+        try:
+            load_more_selectors = [
+                'a.show-more-text',  # National Museum: "Visa mer"
+                'button:has-text("Visa mer")',
+                'button:has-text("Load more")',
+                'a:has-text("Visa mer")',
+                'a:has-text("Load more")',
+                '.show-more',
+                '.load-more',
+                'button[class*="load"]',
+                'a[class*="load"]'
+            ]
+            
+            load_more_clicks = 0
+            max_clicks = 10  # Safety limit - sufficient for 1 month of events
+            
+            for selector in load_more_selectors:
+                while load_more_clicks < max_clicks:
+                    try:
+                        load_btn = page.locator(selector)
+                        if await load_btn.count() > 0:
+                            is_visible = await load_btn.is_visible()
+                            is_enabled = await load_btn.is_enabled()
+                            
+                            if is_visible and is_enabled:
+                                self.logger.info(f"Found '{selector}' - clicking to load more events...")
+                                await load_btn.click(force=True)
+                                await page.wait_for_timeout(1500)  # Wait for content to load
+                                load_more_clicks += 1
+                            else:
+                                break  # Button not visible or enabled, try next selector
+                        else:
+                            break  # No button found, try next selector
+                    except Exception as e:
+                        self.logger.debug(f"Error clicking '{selector}': {e}")
+                        break
+                
+                if load_more_clicks > 0:
+                    self.logger.info(f"Successfully clicked 'load more' {load_more_clicks} times")
+                    break  # Found and clicked the right selector, exit loop
+            
+            if load_more_clicks == 0:
+                self.logger.info("No load more buttons found on page")
+                
+        except Exception as e:
+            self.logger.warning(f"Pagination handling error: {e}")
+
+        # === STEP D: FAST PATH (EXTRACT USING DB SELECTORS) ===
+        # Now runs AFTER all events are loaded via pagination
         if selectors:
             self.logger.info(f"Pointers found for {response.url}. Attempting Fast Path...")
             fast_data = await self.extract_with_selectors(page, selectors)
@@ -1194,7 +1181,7 @@ class MultiSiteEventSpider(scrapy.Spider):
             else:
                 self.logger.info("Fast Path failed or returned no data. Falling back to AI Path.")
 
-        # === STEP D: AI PATH (IF FAST PATH FAILED) ===
+        # === STEP E: AI PATH (IF FAST PATH FAILED) ===
         if not fast_path_success:
             self.logger.info("Extracting event elements for AI processing...")
             # Broad selectors for all 4 sites
@@ -1294,18 +1281,40 @@ class MultiSiteEventSpider(scrapy.Spider):
             # This allows us to save HTML blocks alongside the extracted event data
             html_blocks_for_export = html_snippets  # HTML from elements we analyzed
             
-            # Deduplication
-            seen = set()
-            html_block_index = 0  # Track which HTML block to use
+            # [NEW] Time Slot Consolidation + Deduplication
+            # Logic:
+            # 1. Same event on DIFFERENT days = separate entries (each day is unique)
+            # 2. Same event on SAME day with MULTIPLE times = one entry with combined time slots
+            consolidated = {}
+            html_block_index = 0
+            
             for event in all_extracted_data:
-                key = (event.get('event_name', ''), event.get('date_iso', ''))
-                if key not in seen:
-                    seen.add(key)
+                event_name = event.get('event_name', '')
+                date_iso = event.get('date_iso', '')
+                time_slot = event.get('time', '')
+                
+                # Key for consolidation: (event_name, date_iso) - merges same event + same day
+                key = (event_name, date_iso)
+                
+                if key in consolidated:
+                    # Same event on same day - merge time slots
+                    existing_time = consolidated[key].get('time', '')
+                    if time_slot and time_slot not in existing_time:
+                        if existing_time and existing_time != 'N/A':
+                            consolidated[key]['time'] = f"{existing_time}, {time_slot}"
+                        else:
+                            consolidated[key]['time'] = time_slot
+                    self.logger.debug(f"Merged time slot for {event_name} on {date_iso}: {consolidated[key]['time']}")
+                else:
+                    # New event or different day - create new entry
+                    consolidated[key] = event.copy()
                     # [NEW] Attach HTML block if available (for DOM-rich export)
                     if html_block_index < len(html_blocks_for_export):
-                        event['_html_block'] = html_blocks_for_export[html_block_index]
+                        consolidated[key]['_html_block'] = html_blocks_for_export[html_block_index]
                         html_block_index += 1
-                    extracted_data.append(event)
+            
+            extracted_data = list(consolidated.values())
+            self.logger.info(f"Consolidated {len(all_extracted_data)} raw events into {len(extracted_data)} unique event-day combinations")
 
         await page.close()
         
@@ -1443,15 +1452,21 @@ class MultiSiteEventSpider(scrapy.Spider):
                                     item['end_date_iso'] = end_date_str
                         
                         # [MODIFIED] Check if we need to fetch details
-                        # Force detail page fetch for:
-                        # 1. forskolor events (to get proper descriptions)
-                        # 2. evenemang events (to get proper descriptions and target groups)
-                        # 3. Any event with missing description or location
+                        # [OPTIMIZED] Smart detail page fetching:
+                        # Only fetch detail page if description is truly missing or very short
+                        # This saves significant time for sites like National Museum where 
+                        # listing page already has good descriptions
+                        description = item.get('description', 'N/A')
+                        has_good_description = (
+                            description and 
+                            description != 'N/A' and 
+                            len(description) > 30  # Description is substantial
+                        )
+                        
                         is_stockholm_library = "biblioteket.stockholm.se" in response.url
                         needs_detail_fetch = (
-                            is_stockholm_library or  # [NEW] Always fetch for stockholm library events
-                            item['description'] == 'N/A' or 
-                            item['location'] == 'N/A'
+                            is_stockholm_library or  # Stockholm library needs detail for booking info
+                            not has_good_description  # Only fetch if description is missing/short
                         )
                         
                         if needs_detail_fetch and item['event_url'] and item['event_url'] != response.url:
@@ -1459,6 +1474,7 @@ class MultiSiteEventSpider(scrapy.Spider):
                              yield scrapy.Request(
                                  item['event_url'],
                                  callback=self.parse_details,
+                                 dont_filter=True,  # [NEW] Allow recurring events with same URL but different dates
                                  meta={
                                      'item': item,
                                      'source_url': response.url,  # [NEW] Pass original source URL for context
