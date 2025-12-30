@@ -520,7 +520,7 @@ with tabs[0]:
         filter_date = None
     else:
         date_range = "All Time"  # Not used in specific date mode
-        filter_date = st.date_input("Select Date", value=datetime.now())
+        filter_date = st.date_input("Select Date", value=datetime.now(), key="filter_specific_date")
     
     target_groups = st.multiselect("Target Group", options=["All", "Children", "Adults", "Families"], 
                                     default=["All"])
@@ -726,7 +726,7 @@ with tabs[1]:
         
         custom_col1, custom_col2 = st.columns(2)
         with custom_col1:
-            custom_date = st.date_input("Select Date", value=datetime.now().date())
+            custom_date = st.date_input("Select Date", value=datetime.now().date(), key="schedule_custom_date")
         with custom_col2:
             # Use text input for manual time entry in HH:MM format
             current_time_str = settings.get("schedule_time", "06:00")
