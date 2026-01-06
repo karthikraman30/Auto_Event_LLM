@@ -27,7 +27,10 @@ def run_spider(args):
     output_filename = f"temp_outputs/events_{index}.json"
     full_output_path = os.path.join(event_category_dir, output_filename)
     
-    cmd = [sys.executable, "-m", "scrapy", "crawl", "universal_events", "-a", f"url={url}", "-O", output_filename]
+    # Determine which spider to use based on URL
+    spider_name = "unified_events"  # default
+    
+    cmd = [sys.executable, "-m", "scrapy", "crawl", spider_name, "-a", f"url={url}", "-O", output_filename]
     
     # Debug logging for production
     print(f"[DEBUG] run_spider: Processing {url}")

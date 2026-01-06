@@ -212,13 +212,23 @@ class DatabaseManager:
         
         # If filter_date is provided, show only events on that specific date
         if filter_date:
-            # For specific date filtering, we need to match events that span the date range
-            query += " AND date_iso <= ? AND (end_date_iso >= ? OR end_date_iso = 'N/A')"
-            params.extend([filter_date, filter_date])
+            # Match events where:
+            # 1. date_iso equals filter_date (single-day events on that date), OR
+            # 2. filter_date falls within the event's date range (multi-day events)
+            query += """ AND (
+                date_iso = ? 
+                OR (date_iso <= ? AND end_date_iso >= ? AND end_date_iso != 'N/A')
+            )"""
+            params.extend([filter_date, filter_date, filter_date])
         else:
-            # Always exclude past events - show only from today onwards
-            query += " AND date_iso >= ?"
-            params.append(today)
+            # For multi-day events, include events where:
+            # 1. date_iso is today or later, OR
+            # 2. end_date_iso is today or later (event spans into today/future)
+            query += """ AND (
+                date_iso >= ?
+                OR (end_date_iso >= ? AND end_date_iso != 'N/A')
+            )"""
+            params.extend([today, today])
             
             if date_range == "This Week":
                 week_end = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
@@ -237,19 +247,15 @@ class DatabaseManager:
             query += f" AND target_group IN ({placeholders})"
             params.extend(db_groups)
         
-        # Get total count
-        count_query = query.replace("SELECT *", "SELECT COUNT(*)")
-        cursor.execute(count_query, params)
-        total = cursor.fetchone()[0]
-        
-        # Add pagination
-        query += " ORDER BY date_iso ASC LIMIT ? OFFSET ?"
-        params.extend([per_page, (page - 1) * per_page])
+        # Fetch ALL matching events (no pagination at DB level)
+        query += " ORDER BY date_iso ASC"
         
         cursor.execute(query, params)
         rows = cursor.fetchall()
         column_names = [description[0] for description in cursor.description]
         events = [dict(zip(column_names, row)) for row in rows]
+        
+        conn.close()
         
         # Expand multi-day events
         expanded_events = []
@@ -257,13 +263,27 @@ class DatabaseManager:
             # If filtering by specific date, only expand to that date
             expanded_events.extend(self._expand_event_across_days(event, filter_date=filter_date))
         
-        conn.close()
+        # Filter expanded events to only show today onwards (for multi-day events that started in past)
+        if not filter_date:
+            expanded_events = [e for e in expanded_events if e['date_iso'] >= today]
         
-        return expanded_events, total
+        # Sort by date
+        expanded_events.sort(key=lambda x: x['date_iso'])
+        
+        # Get total count of EXPANDED events
+        total = len(expanded_events)
+        
+        # Apply pagination on expanded events
+        start_idx = (page - 1) * per_page
+        end_idx = start_idx + per_page
+        paginated_events = expanded_events[start_idx:end_idx]
+        
+        return paginated_events, total
     
     def _expand_event_across_days(self, event, filter_date=None):
         """Expand an event that spans multiple days into separate entries for each day.
-        If filter_date is provided, only return the event instance for that specific date."""
+        If filter_date is provided, only return the event instance for that specific date.
+        Expansion is capped at 30 days from today to prevent long-running events from flooding the list."""
         events = []
         start_date_str = event.get('date_iso')
         end_date_str = event.get('end_date_iso')
@@ -273,6 +293,7 @@ class DatabaseManager:
         
         try:
             start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+            today = datetime.now().date()
             
             # If no end date or end date is 'N/A', just return single event
             if not end_date_str or end_date_str == 'N/A':
@@ -284,9 +305,16 @@ class DatabaseManager:
             if start_date == end_date:
                 return [event]
             
-            # Generate event for each day in the range
-            current_date = start_date
-            while current_date <= end_date:
+            # Cap the expansion at 30 days from today
+            max_expansion_date = today + timedelta(days=30)
+            effective_end_date = min(end_date, max_expansion_date)
+            
+            # Start from today if the event started in the past
+            effective_start_date = max(start_date, today)
+            
+            # Generate event for each day in the capped range
+            current_date = effective_start_date
+            while current_date <= effective_end_date:
                 # If filter_date is specified, only return event for that date
                 if filter_date:
                     filter_date_obj = datetime.strptime(filter_date, "%Y-%m-%d").date()
@@ -297,7 +325,7 @@ class DatabaseManager:
                         events.append(event_copy)
                         break
                 else:
-                    # Return all days in the range
+                    # Return all days in the capped range
                     event_copy = event.copy()
                     event_copy['date_iso'] = current_date.strftime("%Y-%m-%d")
                     event_copy['end_date_iso'] = 'N/A'
@@ -317,6 +345,29 @@ class DatabaseManager:
         cursor = conn.cursor()
         cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
         cursor.execute("DELETE FROM events WHERE date_iso < ?", (cutoff,))
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return deleted
+
+    def delete_event(self, event_name, date_iso, event_url):
+        """Delete a specific event by its unique identifiers."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM events WHERE event_name = ? AND date_iso = ? AND event_url = ?",
+            (event_name, date_iso, event_url)
+        )
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return deleted > 0
+
+    def delete_all_events(self):
+        """Delete ALL events from the database."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM events")
         deleted = cursor.rowcount
         conn.commit()
         conn.close()
@@ -399,11 +450,19 @@ class DatabaseManager:
         sources = set()
         for event_url in event_urls:
             for scrape_url, name in url_name_map.items():
-                # Check if the event URL domain matches the scraping URL domain
+                # Check if the event URL matches the scraping URL
                 from urllib.parse import urlparse
-                event_domain = urlparse(event_url).netloc.replace("www.", "")
-                scrape_domain = urlparse(scrape_url).netloc.replace("www.", "")
+                event_parsed = urlparse(event_url)
+                scrape_parsed = urlparse(scrape_url)
+                
+                # Normalize domains (remove www.)
+                event_domain = event_parsed.netloc.replace("www.", "")
+                scrape_domain = scrape_parsed.netloc.replace("www.", "")
+                
+                # Primary match: same domain
                 if event_domain == scrape_domain:
+                    # For sites with very specific paths (like calendar pages), 
+                    # we still want to match events from other parts of the same site
                     sources.add(name)
                     break
         

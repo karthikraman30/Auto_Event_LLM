@@ -481,8 +481,11 @@ with tabs[0]:
         events = db.get_all_events()
         if events:
             df_export = pd.DataFrame(events)
+            # Exclude internal database columns from export
+            columns_to_exclude = ['id', 'last_scraped']
+            df_export = df_export.drop(columns=[col for col in columns_to_exclude if col in df_export.columns])
             csv = df_export.to_csv(index=False).encode('utf-8')
-            st.download_button("📁 Export Excel", csv, "events.csv", "text/csv", width='stretch')
+            st.download_button("📁 Export Excel", csv, "events.csv", "text/csv", use_container_width=True)
         else:
             st.button("📁 Export Excel", disabled=True, width='stretch')
     
@@ -530,21 +533,13 @@ with tabs[0]:
     
     per_page = 20
     
-    # To handle pagination with event expansion, we fetch more events from DB
-    # since they will expand into multiple days. Fetch 3x to account for multi-day events
-    db_per_page = per_page * 3
-    
     events_filtered, total_count = db.get_events_filtered(
         search=search, venue=venue, date_range=date_range, 
         target_groups=target_groups, source=source, page=st.session_state.page, per_page=per_page,
         filter_date=filter_date.strftime("%Y-%m-%d") if filter_date else None
     )
     
-    # After expansion, trim to exactly per_page events for display
-    if len(events_filtered) > per_page:
-        events_filtered = events_filtered[:per_page]
-    
-    # Calculate total pages based on per_page (not expanded count)
+    # Calculate total pages based on total expanded count
     total_pages = math.ceil(total_count / per_page) if total_count > 0 else 1
     
     # Group events by name and date to combine multiple time slots
@@ -681,14 +676,28 @@ with tabs[0]:
                     else:
                         st.write(description)
                     
-                    # Footer row
-                    footer_cols = st.columns([1, 1, 1])
+                    # Footer row with time, booking, and action buttons
+                    footer_cols = st.columns([1, 1, 0.7, 0.7, 1])
                     with footer_cols[0]:
                         st.caption(f"⏰ {time_display}")
                     with footer_cols[1]:
                         st.caption(f"🎟️ {booking_display}")
                     with footer_cols[2]:
-                        st.link_button("View Event →", event_url, width='stretch')
+                        # Accept button - event stays (just visual confirmation)
+                        if st.button("✓ Accept", key=f"accept_{idx}_{event['event_name'][:20]}_{event['date_iso']}", type="primary", use_container_width=True):
+                            st.toast(f"✅ Event '{event['event_name']}' accepted!", icon="✅")
+                    with footer_cols[3]:
+                        # Reject button - delete event
+                        if st.button("✗ Reject", key=f"reject_{idx}_{event['event_name'][:20]}_{event['date_iso']}", type="secondary", use_container_width=True):
+                            # Delete the event from database
+                            deleted = db.delete_event(event['event_name'], event['date_iso'], event_url)
+                            if deleted:
+                                st.toast(f"🗑️ Event '{event['event_name']}' rejected and removed!", icon="🗑️")
+                                st.rerun()
+                            else:
+                                st.error("Failed to delete event")
+                    with footer_cols[4]:
+                        st.link_button("View Event →", event_url, use_container_width=True)
     else:
         st.info("No events found matching your filters.")
     
