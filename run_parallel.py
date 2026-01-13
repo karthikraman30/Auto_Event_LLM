@@ -39,6 +39,7 @@ def run_spider(args):
     
     try:
         # CRITICAL: Use the environment passed from main(), not os.environ
+        print(f"[DEBUG] run_spider: Running command: {' '.join(cmd)}")
         result = subprocess.run(
             cmd, 
             cwd=event_category_dir, 
@@ -48,6 +49,8 @@ def run_spider(args):
             capture_output=True,
             text=True
         )
+        print(f"[DEBUG] run_spider: Command stdout: {result.stdout}")
+        print(f"[DEBUG] run_spider: Command stderr: {result.stderr}")
         if os.path.exists(full_output_path):
             return {"url": url, "path": full_output_path, "success": True, "error": None}
         return {"url": url, "path": None, "success": False, "error": f"Output file not created. stdout: {result.stdout[-500:] if result.stdout else 'empty'}"}
@@ -114,11 +117,16 @@ def main():
         return {"events": 0, "failures": 0, "warnings": ["No enabled URLs configured"]}
     
     print(f"[DEBUG] main: Found {len(urls)} URLs to scrape")
+    for i, url in enumerate(urls):
+        print(f"[DEBUG] main: URL {i+1}: {url}")
     
     # Use absolute path for temp_outputs directory
     base_dir = os.path.dirname(os.path.abspath(__file__))
     temp_dir = os.path.join(base_dir, "event_category", "temp_outputs")
     os.makedirs(temp_dir, exist_ok=True)
+    print(f"[DEBUG] main: Temp directory: {temp_dir}")
+    print(f"[DEBUG] main: Temp dir exists: {os.path.exists(temp_dir)}")
+    print(f"[DEBUG] main: Temp dir writable: {os.access(temp_dir, os.W_OK)}")
     
     results = []
     failures = 0
@@ -133,6 +141,17 @@ def main():
         for future in as_completed(futures):
             result = future.result()
             results.append(result)
+            print(f"[DEBUG] main: Got result for {result['url']}")
+            print(f"[DEBUG] main: Success: {result['success']}")
+            if result['success']:
+                print(f"[DEBUG] main: Output file: {result['path']}")
+                if result['path'] and os.path.exists(result['path']):
+                    file_size = os.path.getsize(result['path'])
+                    print(f"[DEBUG] main: File size: {file_size} bytes")
+                else:
+                    print(f"[DEBUG] main: Output file not found!")
+            else:
+                print(f"[DEBUG] main: Error: {result['error']}")
             
             if not result["success"]:
                 failures += 1
