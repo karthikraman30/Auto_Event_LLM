@@ -189,12 +189,6 @@ class UnifiedEventSpider(scrapy.Spider):
             yield item
 
     async def handle_skansen(self, page, response):
-    # 🔥 Wait until events are rendered (CRITICAL)
-        await page.wait_for_selector(
-            "ul.calendarList__list li.calendarItem",
-            timeout=20000
-        )
-
         selectors = self.db.get_selectors(response.url)
         if not selectors:
             self.logger.warning("No selectors for Skansen")
@@ -202,7 +196,7 @@ class UnifiedEventSpider(scrapy.Spider):
             return
 
         # Iterate day-by-day (Skansen is a true calendar)
-        for _ in range(30):
+        for day_num in range(30):
             # 1️⃣ Get currently selected calendar date
             try:
                 date_el = page.locator(".calendarTopBar__dropdownButton span.p")
@@ -219,45 +213,55 @@ class UnifiedEventSpider(scrapy.Spider):
                 self.logger.warning(f"Error extracting Skansen date: {e}")
                 break
 
-            # 2️⃣ Extract events FOR THIS DAY ONLY
-            extracted = await self.extract_with_selectors(page, selectors)
+            # 2️⃣ Check if events exist for this day (don't wait forever)
+            try:
+                # Wait a short time for events to load, but don't fail if there are none
+                await page.wait_for_selector(
+                    "ul.calendarList__list li.calendarItem",
+                    timeout=5000  # Reduced timeout
+                )
+                events_found = True
+            except:
+                # No events found for this day, that's okay
+                events_found = False
+                self.logger.info(f"No events found for Skansen on {current_date}")
 
-            for item_data in extracted:
-                name = item_data.get('event_name')
-                if not name:
-                    continue
+            # 3️⃣ Extract events FOR THIS DAY ONLY (if any exist)
+            if events_found:
+                extracted = await self.extract_with_selectors(page, selectors)
 
-                item = EventCategoryItem()
-                item['event_name'] = name.strip()
-                item['event_url'] = response.urljoin(item_data.get('event_url', ''))
-                item['date_iso'] = current_date
-                item['date'] = current_date
-                item['end_date_iso'] = 'N/A'  # IMPORTANT: Skansen has NO ranges
-                item['time'] = extract_time_only(item_data.get('time'))
-                item['description'] = item_data.get('description') or 'N/A'
-                item['location'] = extract_location_from_title(name)
+                for item_data in extracted:
+                    name = item_data.get('event_name')
+                    if not name:
+                        continue
 
-                tg = item_data.get('target_group')
-                item['target_group'] = tg or 'All'
-                item['target_group_normalized'] = self.simple_normalize(tg)
+                    item = EventCategoryItem()
+                    item['event_name'] = name.strip()
+                    item['event_url'] = response.urljoin(item_data.get('event_url', ''))
+                    item['date_iso'] = current_date
+                    item['date'] = current_date
+                    item['end_date_iso'] = 'N/A'  # IMPORTANT: Skansen has NO ranges
+                    item['time'] = extract_time_only(item_data.get('time'))
+                    item['description'] = item_data.get('description') or 'N/A'
+                    item['location'] = extract_location_from_title(name)
 
-                item['status'] = detect_cancelled_status(name, item['description'])
-                item['booking_info'] = 'N/A'
+                    tg = item_data.get('target_group')
+                    item['target_group'] = tg or 'All'
+                    item['target_group_normalized'] = self.simple_normalize(tg)
 
-                yield item
+                    item['status'] = detect_cancelled_status(name, item['description'])
+                    item['booking_info'] = 'N/A'
 
-            # 3️⃣ Move to next day
+                    yield item
+
+            # 4️⃣ Move to next day
             try:
                 next_btn = page.locator("button.link:has-text('Next day')")
                 if await next_btn.count() > 0 and await next_btn.is_visible():
                     await next_btn.click()
                     await page.wait_for_timeout(500)
-
-                    await page.wait_for_selector(
-                        "ul.calendarList__list li.calendarItem",
-                        timeout=20000
-                    )
                 else:
+                    self.logger.info(f"No more 'Next day' button found after {day_num + 1} days")
                     break
             except Exception as e:
                 self.logger.warning(f"Error clicking next day on Skansen: {e}")
