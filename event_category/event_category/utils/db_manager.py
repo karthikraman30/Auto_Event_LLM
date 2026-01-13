@@ -137,38 +137,62 @@ class DatabaseManager:
     
     def upsert_event(self, event_data):
         """Insert new event or update existing info (Deduplication)."""
-        conn = sqlite3.connect(self.db_path, timeout=30.0)
-        cursor = conn.cursor()
+        print(f"[DEBUG] upsert_event: Starting for event: {event_data.get('event_name', 'Unknown')}")
+        print(f"[DEBUG] upsert_event: DB path: {self.db_path}")
         
-        cursor.execute('''
-            INSERT INTO events (
-                event_name, date_iso, event_url, end_date_iso, time, location, 
-                target_group, status, booking_info, description, last_scraped
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(event_name, date_iso, event_url, location) DO UPDATE SET
-                end_date_iso = excluded.end_date_iso,
-                time = excluded.time,
-                location = excluded.location,
-                target_group = excluded.target_group,
-                status = excluded.status,
-                booking_info = excluded.booking_info,
-                description = excluded.description,
-                last_scraped = CURRENT_TIMESTAMP
-        ''', (
-            event_data.get('event_name'),
-            event_data.get('date_iso'),
-            event_data.get('event_url'),
-            event_data.get('end_date_iso'),
-            event_data.get('time'),
-            event_data.get('location'),
-            event_data.get('target_group_normalized'),
-            event_data.get('status'),
-            event_data.get('booking_info'),
-            event_data.get('description')
-        ))
-        conn.commit()
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=30.0)
+            cursor = conn.cursor()
+            print(f"[DEBUG] upsert_event: Database connected successfully")
+        except Exception as e:
+            print(f"[DEBUG] upsert_event: Database connection failed: {e}")
+            raise
+        
+        try:
+            cursor.execute('''
+                INSERT INTO events (
+                        event_name, date_iso, event_url, end_date_iso, time, location, 
+                        target_group, status, booking_info, description, last_scraped
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(event_name, date_iso, event_url, location) DO UPDATE SET
+                        end_date_iso = excluded.end_date_iso,
+                        time = excluded.time,
+                        location = excluded.location,
+                        target_group = excluded.target_group,
+                        status = excluded.status,
+                        booking_info = excluded.booking_info,
+                        description = excluded.description,
+                        last_scraped = CURRENT_TIMESTAMP
+            ''', (
+                event_data.get('event_name'),
+                event_data.get('date_iso'),
+                event_data.get('event_url'),
+                event_data.get('end_date_iso'),
+                event_data.get('time'),
+                event_data.get('location'),
+                event_data.get('target_group'),
+                event_data.get('status'),
+                event_data.get('booking_info'),
+                event_data.get('description'),
+            ))
+            print(f"[DEBUG] upsert_event: SQL executed successfully")
+        except Exception as e:
+            print(f"[DEBUG] upsert_event: SQL execution failed: {e}")
+            print(f"[DEBUG] upsert_event: Event data: {event_data}")
+            conn.close()
+            raise
+        
+        try:
+            conn.commit()
+            print(f"[DEBUG] upsert_event: Transaction committed successfully")
+        except Exception as e:
+            print(f"[DEBUG] upsert_event: Commit failed: {e}")
+            conn.close()
+            raise
+            
         conn.close()
+        print(f"[DEBUG] upsert_event: Completed successfully")
 
     def get_all_events(self):
         conn = sqlite3.connect(self.db_path, timeout=30.0)

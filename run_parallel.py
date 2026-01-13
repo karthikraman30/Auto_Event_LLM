@@ -67,35 +67,53 @@ def run_spider(args):
 
 def merge_to_db(results):
     """Merge scraped events to database and return statistics."""
+    print(f"[DEBUG] merge_to_db: Starting with {len(results)} results")
+    
     try:
         db = DatabaseManager()
+        print(f"[DEBUG] merge_to_db: DatabaseManager initialized")
     except Exception as e:
-        print(f"❌ Failed to initialize DatabaseManager: {e}")
+        print(f"[DEBUG] merge_to_db: Failed to initialize DatabaseManager: {e}")
         raise
     
     total_events = 0
     
-    for result in results:
+    for i, result in enumerate(results):
+        print(f"[DEBUG] merge_to_db: Processing result {i+1}/{len(results)}")
+        print(f"[DEBUG] merge_to_db: Result success: {result['success']}")
+        
         if result["success"] and result["path"] and os.path.exists(result["path"]):
             try:
+                print(f"[DEBUG] merge_to_db: Reading file: {result['path']}")
                 with open(result["path"], 'r', encoding='utf-8') as f:
                     events = json.load(f)
-                    print(f"📊 Processing {len(events)} events from {result['path']}")
+                    print(f"[DEBUG] merge_to_db: Found {len(events)} events in file")
                     
-                    for event in events:
+                    for j, event in enumerate(events):
                         try:
+                            print(f"[DEBUG] merge_to_db: Inserting event {j+1}/{len(events)}")
                             db.upsert_event(event)
                         except Exception as e:
-                            print(f"❌ Failed to upsert event: {e}")
-                            print(f"   Event data: {event}")
+                            print(f"[DEBUG] merge_to_db: Failed to upsert event {j+1}: {e}")
+                            print(f"[DEBUG] merge_to_db: Event data: {event}")
                             continue
                     
                     total_events += len(events)
+                    print(f"[DEBUG] merge_to_db: Successfully processed {len(events)} events")
                 os.remove(result["path"])
+                print(f"[DEBUG] merge_to_db: Removed temp file: {result['path']}")
             except Exception as e:
-                print(f"❌ Failed to process result file {result['path']}: {e}")
+                print(f"[DEBUG] merge_to_db: Failed to process result file {result['path']}: {e}")
                 continue
+        else:
+            if not result["success"]:
+                print(f"[DEBUG] merge_to_db: Skipping failed result: {result['error']}")
+            elif not result["path"]:
+                print(f"[DEBUG] merge_to_db: Skipping result with no path")
+            elif not os.path.exists(result["path"]):
+                print(f"[DEBUG] merge_to_db: Skipping result with missing file: {result['path']}")
     
+    print(f"[DEBUG] merge_to_db: Completed. Total events: {total_events}")
     return total_events
 
 def main():
