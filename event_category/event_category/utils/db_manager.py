@@ -64,7 +64,7 @@ class DatabaseManager:
                 booking_info TEXT,
                 description TEXT,
                 last_scraped TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(event_name, date_iso, event_url)
+                UNIQUE(event_name, date_iso, event_url, location)
             )
         ''')
         
@@ -146,7 +146,7 @@ class DatabaseManager:
                 target_group, status, booking_info, description, last_scraped
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(event_name, date_iso, event_url) DO UPDATE SET
+            ON CONFLICT(event_name, date_iso, event_url, location) DO UPDATE SET
                 end_date_iso = excluded.end_date_iso,
                 time = excluded.time,
                 location = excluded.location,

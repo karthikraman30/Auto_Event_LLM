@@ -123,8 +123,10 @@ class UnifiedEventSpider(scrapy.Spider):
     name = "unified_events"
     custom_settings = {
         'USER_AGENT': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'DOWNLOAD_DELAY': 2,
+        'DOWNLOAD_DELAY': 0.5,  # Reduced from 2 for faster scraping
         'RANDOMIZE_DOWNLOAD_DELAY': True,
+        'CONCURRENT_REQUESTS': 8,  # Process 8 requests in parallel
+        'CONCURRENT_REQUESTS_PER_DOMAIN': 4,  # Limit per domain to be polite
     }
     start_urls = [
         "https://biblioteket.stockholm.se/evenemang",
@@ -822,20 +824,53 @@ class UnifiedEventSpider(scrapy.Spider):
             end_date = parse_swedish_date(parts[1]) if len(parts) > 1 else None
 
             # FIX: Handle year boundary issues for date ranges
-            # If end date has explicit year and start date month > end date month,
-            # the start date is likely in the previous year
+            # If end date has explicit year, use it to correctly set start date year
             if start_date and end_date and len(parts) > 1:
                 start_year = int(start_date.split('-')[0])
                 start_month = int(start_date.split('-')[1])
+                start_day = start_date.split('-')[2]
                 end_year = int(end_date.split('-')[0])
                 end_month = int(end_date.split('-')[1])
                 
                 # Check if end date has explicit year in the raw string
                 has_explicit_year = re.search(r'\b(20\d{2})\b', parts[1])
+                # Check if start date has explicit year in the raw string
+                start_has_explicit_year = re.search(r'\b(20\d{2})\b', parts[0])
                 
-                # If end has explicit year and start month > end month, adjust start year
-                if has_explicit_year and start_month > end_month and start_year == end_year:
-                    start_date = f"{end_year - 1}-{start_month:02d}-{start_date.split('-')[2]}"
+                # If end has explicit year but start doesn't, we need to figure out start's year
+                if has_explicit_year and not start_has_explicit_year:
+                    current_year = today.year
+                    
+                    # For multi-year events, try to find a year that makes the event currently active
+                    # Try years from end_year down to current_year-1
+                    possible_years = [end_year, end_year - 1, end_year - 2, current_year, current_year - 1]
+                    best_start_date = None
+                    
+                    for try_year in possible_years:
+                        try_start = f"{try_year}-{start_month:02d}-{start_day}"
+                        try:
+                            try_start_dt = datetime.strptime(try_start, "%Y-%m-%d").date()
+                            end_dt_check = datetime.strptime(end_date, "%Y-%m-%d").date()
+                            
+                            # Check if this year makes the event currently active (ongoing)
+                            if try_start_dt <= today <= end_dt_check:
+                                best_start_date = try_start
+                                self.logger.info(f"Found ongoing event: start {try_start} <= today <= end {end_date}")
+                                break
+                        except ValueError:
+                            continue
+                    
+                    # If no ongoing match found, use the most reasonable year
+                    if not best_start_date:
+                        if start_month > end_month:
+                            # Start month is after end month, so start is in previous year
+                            best_start_date = f"{end_year - 1}-{start_month:02d}-{start_day}"
+                        else:
+                            # Default: same year as end
+                            best_start_date = f"{end_year}-{start_month:02d}-{start_day}"
+                    
+                    start_date = best_start_date
+                    self.logger.info(f"Adjusted start date to {start_date} based on end date {end_date}")
 
             if not start_date:
                 continue
