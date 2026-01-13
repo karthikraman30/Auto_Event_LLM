@@ -64,17 +64,34 @@ def run_spider(args):
 
 def merge_to_db(results):
     """Merge scraped events to database and return statistics."""
-    db = DatabaseManager()
+    try:
+        db = DatabaseManager()
+    except Exception as e:
+        print(f"❌ Failed to initialize DatabaseManager: {e}")
+        raise
+    
     total_events = 0
     
     for result in results:
         if result["success"] and result["path"] and os.path.exists(result["path"]):
-            with open(result["path"], 'r', encoding='utf-8') as f:
-                events = json.load(f)
-                for event in events:
-                    db.upsert_event(event)
-                total_events += len(events)
-            os.remove(result["path"])
+            try:
+                with open(result["path"], 'r', encoding='utf-8') as f:
+                    events = json.load(f)
+                    print(f"📊 Processing {len(events)} events from {result['path']}")
+                    
+                    for event in events:
+                        try:
+                            db.upsert_event(event)
+                        except Exception as e:
+                            print(f"❌ Failed to upsert event: {e}")
+                            print(f"   Event data: {event}")
+                            continue
+                    
+                    total_events += len(events)
+                os.remove(result["path"])
+            except Exception as e:
+                print(f"❌ Failed to process result file {result['path']}: {e}")
+                continue
     
     return total_events
 
@@ -128,7 +145,11 @@ def main():
                 warnings.append(f"{site_name}: {result['error']}")
     
     # Merge successful results to database
-    total_events = merge_to_db(results)
+    try:
+        total_events = merge_to_db(results)
+    except Exception as e:
+        print(f"❌ Failed to merge results to database: {e}")
+        raise
     
     print(f"Scraping complete: {total_events} events, {failures} failures")
     
