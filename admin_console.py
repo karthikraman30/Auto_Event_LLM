@@ -400,13 +400,16 @@ with tabs[0]:
     # --- ACTIONS SECTION ---
     st.markdown("---")
     st.subheader("🎬 ACTIONS")
-    action_col1, action_col2, action_col3 = st.columns([1, 1, 3])
+    action_col1, action_col2, action_col3 = st.columns([1, 1, 1])
     
     if 'log_buffer' not in st.session_state:
         st.session_state.log_buffer = ""
     
+    if 'confirm_clear_events' not in st.session_state:
+        st.session_state.confirm_clear_events = False
+    
     with action_col1:
-        if st.button("🚀 Scrape Now", width='stretch'):
+        if st.button("🚀 Scrape Now", use_container_width=True):
             st.session_state.log_buffer = "Starting parallel scrape...\n"
             with st.spinner("Scraping all venues... check the Logs tab for progress."):
                 try:
@@ -439,6 +442,8 @@ with tabs[0]:
                             status = "Warn" if failures > 0 else "OK"
                             db.add_log("Manual", status, events_count, failures, None)
                         st.success("✅ Scrape completed successfully!")
+                        # Reset clear events confirmation after successful scrape
+                        st.session_state.confirm_clear_events = False
                         st.rerun()  # Refresh to show new counts in metrics
                     else:
                         error_msg = f"Return code: {result.returncode}\nSTDERR: {result.stderr}"
@@ -487,7 +492,26 @@ with tabs[0]:
             csv = df_export.to_csv(index=False).encode('utf-8')
             st.download_button("📁 Export Excel", csv, "events.csv", "text/csv", use_container_width=True)
         else:
-            st.button("📁 Export Excel", disabled=True, width='stretch')
+            st.button("📁 Export Excel", disabled=True, use_container_width=True)
+    
+    with action_col3:
+        if st.button("🗑️ Clear Events", use_container_width=True):
+            # Show confirmation dialog
+            if st.session_state.get('confirm_clear_events', False):
+                # User confirmed, proceed with clearing
+                try:
+                    deleted_count = db.delete_all_events()
+                    st.success(f"✅ Successfully cleared {deleted_count} events from database!")
+                    # Reset confirmation state after successful clear
+                    st.session_state.confirm_clear_events = False
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Error clearing events: {str(e)}")
+            else:
+                # First click - show confirmation
+                st.session_state.confirm_clear_events = True
+                st.warning("⚠️ Are you sure? Click 'Clear Events' again to confirm.")
+                st.rerun()
     
     # --- FILTERS SECTION ---
     st.markdown("---")

@@ -619,14 +619,36 @@ class UnifiedEventSpider(scrapy.Spider):
                 self.logger.warning(f"Could not extract time for {response.url}: {e}")
                 time_info = 'N/A'
             
-            # NEW: Check for recurring events (Fler datum section)
+            # NEW: Check for recurring events (Fler datum section) AND main event date
             try:
+                occurrences = []
+                
+                # First, extract the main event date (the 17th you're missing!)
+                try:
+                    main_date_elements = await page.locator('span.ml-8.py-4.text-text.text-5xl').all()
+                    for element in main_date_elements:
+                        try:
+                            main_date_text = await element.inner_text()
+                            # Parse Swedish date format
+                            parsed_date = parse_swedish_date(main_date_text.strip())
+                            if parsed_date:
+                                # Extract time for this main date if available
+                                main_time = time_info  # Use the time extracted earlier
+                                occurrences.append((parsed_date, main_time))
+                                self.logger.info(f"Found main event date: {parsed_date} at {main_time}")
+                                break  # Take the first valid main date
+                        except Exception as e:
+                            self.logger.warning(f"Could not parse main date: {e}")
+                            continue
+                except Exception as e:
+                    self.logger.warning(f"Error extracting main date: {e}")
+                
+                # Then, extract additional dates from "Fler datum" section
                 fler_datum_list = page.locator('ul.richtext')
                 fler_datum_count = await fler_datum_list.count()
                 
                 if fler_datum_count > 0:
-                    self.logger.info(f"Found 'Fler datum' section for {name}, extracting specific occurrence dates")
-                    occurrences = []
+                    self.logger.info(f"Found 'Fler datum' section for {name}, extracting additional occurrence dates")
                     
                     # Get additional dates from list
                     list_items = fler_datum_list.locator('li.list-none')
@@ -648,27 +670,27 @@ class UnifiedEventSpider(scrapy.Spider):
                             self.logger.warning(f"Could not parse occurrence {i}: {e}")
                             continue
                     
-                    # Yield separate events for each occurrence
-                    if occurrences:
-                        self.logger.info(f"Yielding {len(occurrences)} occurrence(s) for {name}")
-                        for occurrence_date, occurrence_time in occurrences:
-                            item = EventCategoryItem()
-                            item['event_name'] = name
-                            item['event_url'] = response.url
-                            item['date_iso'] = occurrence_date
-                            item['date'] = occurrence_date
-                            item['end_date_iso'] = 'N/A'  # Single occurrence
-                            item['time'] = occurrence_time if occurrence_time and occurrence_time != 'N/A' else time_info
-                            item['location'] = "Armémuseum"
-                            item['description'] = desc
-                            item['target_group'] = "All"
-                            item['target_group_normalized'] = 'all_ages'
-                            item['status'] = detect_cancelled_status(name, desc)
-                            item['booking_info'] = 'N/A'
-                            yield item
-                        
-                        await page.close()
-                        return  # Don't yield the original range-based item
+                    # Yield separate events for each occurrence (including main event date)
+                if occurrences:
+                    self.logger.info(f"Yielding {len(occurrences)} occurrence(s) for {name}")
+                    for occurrence_date, occurrence_time in occurrences:
+                        item = EventCategoryItem()
+                        item['event_name'] = name
+                        item['event_url'] = response.url
+                        item['date_iso'] = occurrence_date
+                        item['date'] = occurrence_date
+                        item['end_date_iso'] = 'N/A'  # Single occurrence
+                        item['time'] = occurrence_time if occurrence_time and occurrence_time != 'N/A' else time_info
+                        item['location'] = "Armémuseum"
+                        item['description'] = desc
+                        item['target_group'] = "All"
+                        item['target_group_normalized'] = 'all_ages'
+                        item['status'] = detect_cancelled_status(name, desc)
+                        item['booking_info'] = 'N/A'
+                        yield item
+                    
+                    await page.close()
+                    return  # Don't yield the original range-based item since we have specific dates
                         
             except Exception as e:
                 self.logger.warning(f"Error checking for recurring events: {e}")
