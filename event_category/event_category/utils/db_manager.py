@@ -60,6 +60,7 @@ class DatabaseManager:
                 time TEXT,
                 location TEXT,
                 target_group TEXT, 
+                target_group_normalized TEXT DEFAULT 'all_ages',
                 status TEXT,
                 booking_info TEXT,
                 description TEXT,
@@ -67,6 +68,12 @@ class DatabaseManager:
                 UNIQUE(event_name, date_iso, event_url, location)
             )
         ''')
+        
+        # Add target_group_normalized column if it doesn't exist (for backward compatibility)
+        try:
+            cursor.execute("ALTER TABLE events ADD COLUMN target_group_normalized TEXT DEFAULT 'all_ages'")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         
         # Settings Table (key-value store)
         cursor.execute('''
@@ -152,14 +159,15 @@ class DatabaseManager:
             cursor.execute('''
                 INSERT INTO events (
                         event_name, date_iso, event_url, end_date_iso, time, location, 
-                        target_group, status, booking_info, description, last_scraped
+                        target_group, target_group_normalized, status, booking_info, description, last_scraped
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                     ON CONFLICT(event_name, date_iso, event_url, location) DO UPDATE SET
                         end_date_iso = excluded.end_date_iso,
                         time = excluded.time,
                         location = excluded.location,
                         target_group = excluded.target_group,
+                        target_group_normalized = excluded.target_group_normalized,
                         status = excluded.status,
                         booking_info = excluded.booking_info,
                         description = excluded.description,
@@ -172,6 +180,7 @@ class DatabaseManager:
                 event_data.get('time'),
                 event_data.get('location'),
                 event_data.get('target_group'),
+                event_data.get('target_group_normalized'),
                 event_data.get('status'),
                 event_data.get('booking_info'),
                 event_data.get('description'),
