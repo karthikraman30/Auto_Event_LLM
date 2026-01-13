@@ -575,7 +575,7 @@ with tabs[0]:
                 'event_name': event['event_name'],
                 'date_iso': event['date_iso'],
                 'location': event['location'],
-                'target_group': event['target_group'],
+                'target_group': event.get('target_group_normalized') or event.get('target_group'),
                 'description': event['description'],
                 'booking_info': event['booking_info'],
                 'event_url': event['event_url'],
@@ -642,7 +642,7 @@ with tabs[0]:
                 display_date = event['date_iso'] or "Date TBA"
             
             location = event['location'] or "Location TBA"
-            age_group = (event['target_group'] or "all_ages").replace("_", " ").title()
+            age_group = (event.get('target_group_normalized') or event.get('target_group') or "all_ages").replace("_", " ").title()
             description = event['description'] or "No description available."
             
             # Format multiple times separated by comma
