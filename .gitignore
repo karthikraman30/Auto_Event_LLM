@@ -57,3 +57,21 @@ Thumbs.db
 *.json
 *.csv
 
+# Databases (recreated by seed_selectors.py or by scraping)
+selectors.db
+*.db
+event_category/*.db
+event_category/events.db
+
+# Debug/test scripts (development only)
+debug_*.py
+test_*.py
+check_*.py
+verify_*.py
+simulate_*.py
+insert_*.py
+
+# Documentation notes (optional - remove if you want to push these)
+BUG_FIXES_*.md
+TIMEZONE_FIX_NOTES.md
+

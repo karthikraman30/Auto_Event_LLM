@@ -41,6 +41,7 @@ ROBOTSTXT_OBEY = True
 CONCURRENT_REQUESTS = 8  # [NEW] Enable parallel requests
 CONCURRENT_REQUESTS_PER_DOMAIN = 4  # [MODIFIED] Increase from 1 to 4
 DOWNLOAD_DELAY = 0.3  # [MODIFIED] Reduce from 1s to 0.3s
+DOWNLOAD_TIMEOUT = 60  # [NEW] 60 second timeout for downloads
 
 # Disable cookies (enabled by default)
 #COOKIES_ENABLED = False
@@ -119,6 +120,15 @@ TWISTED_REACTOR = "twisted.internet.asyncioreactor.AsyncioSelectorReactor"
 # Playwright launch options
 PLAYWRIGHT_LAUNCH_OPTIONS = {
     "headless": True,
+    # Note: ignore_https_errors is set in PLAYWRIGHT_CONTEXTS below, not here
+    # (it's a context option, not a browser launch option)
+}
+
+# Playwright context options (applied to each browsing context)
+PLAYWRIGHT_CONTEXTS = {
+    "default": {
+        "ignore_https_errors": True,  # Also apply to context for SSL errors
+    }
 }
 
 # Default timeout for playwright operations (in milliseconds)

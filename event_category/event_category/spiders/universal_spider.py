@@ -52,6 +52,7 @@ def extract_time_only(time_str):
     return time_str
 
 def extract_location_from_title(title):
+    """Legacy function - use extract_skansen_location for better results"""
     if not title:
         return "Skansen"
     for pattern in [r'\bat\s+([A-ZÅÄÖ][\w\s]+?)(?:\s*[-–]|$)', r'\bin\s+([A-ZÅÄÖ][\w\s]+?)(?:\s*[-–]|$)', r'\bi\s+([A-ZÅÄÖ][\w\s]+?)(?:\s*[-–]|$)', r'\bpå\s+([A-ZÅÄÖ][\w\s]+?)(?:\s*[-–]|$)']:
@@ -60,6 +61,136 @@ def extract_location_from_title(title):
             return match.group(1).strip()
     if any(kw in title.lower() for kw in ['farmstead', 'church', 'kyrka', 'gård', 'torg', 'stage', 'hall', 'house', 'hus']):
         return title
+    return "Skansen"
+
+# Known Skansen venue keywords and their display names
+SKANSEN_VENUES = {
+    # Animals & Zoo
+    'seal enclosure': 'Seal Enclosure',
+    'upper seal': 'Upper Seal Enclosure',
+    'children\'s zoo': 'Children\'s Zoo',
+    'barnens zoo': 'Children\'s Zoo',
+    'lill-skansen': 'Lill-Skansen',
+    'lillskansen': 'Lill-Skansen',
+    'bear': 'Bear Enclosure',
+    'björn': 'Bear Enclosure',
+    'wolf': 'Wolf Enclosure',
+    'varg': 'Wolf Enclosure',
+    'moose': 'Moose Enclosure',
+    'älg': 'Moose Enclosure',
+    'reindeer': 'Reindeer Enclosure',
+    'ren': 'Reindeer Enclosure',
+    
+    # Science & Museum
+    'baltic sea science center': 'Baltic Sea Science Center',
+    'baltic sea': 'Baltic Sea Science Center',
+    'östersjöns science center': 'Baltic Sea Science Center',
+    'aquarium': 'Aquarium',
+    
+    # Food & Dining
+    'bollnästorget': 'Bollnästorget',
+    'bollnäs': 'Bollnästorget',
+    'stora gungan': 'Stora Gungan Tavern',
+    'tavern': 'Stora Gungan Tavern',
+    'krogen': 'Stora Gungan Tavern',
+    'solliden': 'Solliden Restaurant',
+    
+    # Historical Buildings & Workshops
+    'bakery': 'Bakery',
+    'bageriet': 'Bakery',
+    'old shop': 'Old Shop (Kryddboden)',
+    'kryddboden': 'Old Shop (Kryddboden)',
+    'bookbindery': 'Bookbindery',
+    'bokbinderiet': 'Bookbindery',
+    'printer': 'Printer\'s Workshop',
+    'tryckeriet': 'Printer\'s Workshop',
+    'tinsmith': 'Tinsmith\'s Workshop',
+    'bleckslagare': 'Tinsmith\'s Workshop',
+    'ironmonger': 'Ironmonger\'s Store',
+    'järnhandel': 'Ironmonger\'s Store',
+    'glassblower': 'Glassblower\'s Hut',
+    'glasblåsare': 'Glassblower\'s Hut',
+    'pottery': 'Pottery',
+    'krukmakeri': 'Pottery',
+    'sámi camp': 'Sámi Camp',
+    'samernas': 'Sámi Camp',
+    
+    # Churches & Ceremonial
+    'seglora church': 'Seglora Church',
+    'seglora kyrka': 'Seglora Church',
+    'church': 'Seglora Church',
+    'kyrka': 'Seglora Church',
+    
+    # Town & Districts
+    'city quarter': 'City Quarters',
+    'town quarter': 'Town Quarters',
+    'stadskvarter': 'City Quarters',
+    'escalator': 'City Quarters (near escalator)',
+    
+    # Farmsteads
+    'skogaholm': 'Skogaholm Manor',
+    'älvros': 'Älvros Farmstead',
+    'moragården': 'Mora Farmstead',
+    'oktorpsgården': 'Oktorpsgården',
+    'delsbogården': 'Delsbogården',
+    
+    # Stables
+    'stable': 'Stable',
+    'stallet': 'Stable',
+    'horse': 'Horse Stable',
+    'häst': 'Horse Stable',
+    
+    # Museum
+    'snus': 'Snus and Match Museum',
+    'match museum': 'Snus and Match Museum',
+    'tobacco': 'Snus and Match Museum',
+}
+
+def extract_skansen_location(title, description=''):
+    """
+    Extract location from Skansen event title and description.
+    Checks both fields for known venue keywords.
+    """
+    if not title:
+        return "Skansen"
+    
+    combined_text = f"{title} {description or ''}".lower()
+    
+    # 1. First check for known venue keywords in combined text
+    for keyword, venue_name in SKANSEN_VENUES.items():
+        if keyword in combined_text:
+            return venue_name
+    
+    # 2. Try regex patterns for "at/in/på" phrases in title
+    for pattern in [
+        r'\bat\s+(?:the\s+)?([A-ZÅÄÖ][\w\s\']+?)(?:\s*[-–,\.]|$)',
+        r'\bin\s+(?:the\s+)?([A-ZÅÄÖ][\w\s\']+?)(?:\s*[-–,\.]|$)',
+        r'\bi\s+([A-ZÅÄÖ][\w\s\']+?)(?:\s*[-–,\.]|$)',
+        r'\bpå\s+([A-ZÅÄÖ][\w\s\']+?)(?:\s*[-–,\.]|$)',
+        r'\binside\s+(?:the\s+)?([A-ZÅÄÖ][\w\s\']+?)(?:\s*[-–,\.]|$)',
+    ]:
+        match = re.search(pattern, title, re.IGNORECASE)
+        if match and len(match.group(1).strip()) > 2:
+            return match.group(1).strip()
+    
+    # 3. Also try regex on description for "at the X" patterns
+    if description:
+        for pattern in [
+            r'\bat\s+(?:the\s+)?([A-ZÅÄÖ][\w\s\']+?)(?:\s*[-–,\.]|$)',
+            r'\binside\s+(?:the\s+)?([A-ZÅÄÖ][\w\s\']+?)(?:\s*[-–,\.]|$)',
+        ]:
+            match = re.search(pattern, description, re.IGNORECASE)
+            if match and len(match.group(1).strip()) > 2:
+                extracted = match.group(1).strip()
+                # Avoid extracting overly generic words
+                if extracted.lower() not in ['the', 'a', 'an', 'skansen', 'our', 'this']:
+                    return extracted
+    
+    # 4. Check if the event name itself is a known venue type
+    if any(kw in title.lower() for kw in ['farmstead', 'church', 'kyrka', 'gård', 'torg', 'stage', 'hall', 'house', 'hus', 'shop', 'museum', 'workshop']):
+        return title
+    
+    # 5. Default fallback
     return "Skansen"
 
 def detect_cancelled_status(name, desc='', status=''):
@@ -86,6 +217,11 @@ def extract_target_group_from_name(event_name, description=''):
     """Extract target group from event name and description for Moderna Museet"""
     text = f"{event_name} {description}".lower()
     
+    # Check for general guided tours (English) - these are for all ages, not just families
+    # This must come BEFORE family keyword check to override FAMILJEVISNING label
+    if 'guided tour' in event_name.lower():
+        return "All", "all_ages"
+    
     # Check for specific age ranges in event name
     age_match = re.search(r'för\s+(\d{1,2})(?:[-–]\s*(\d{1,2}))?\s*år', event_name.lower())
     if age_match:
@@ -104,8 +240,8 @@ def extract_target_group_from_name(event_name, description=''):
             elif min_age >= 13:
                 return "Teens", "teens"
     
-    # Check for family-related keywords
-    if any(kw in text for kw in ['familj', 'familjevisning', 'lovprogram', 'jullov', 'sommarlov']):
+    # Check for family-related keywords (including Armemuseum labels like FAMILJEVISNING)
+    if any(kw in text for kw in ['familj', 'familjevisning', 'lovprogram', 'jullov', 'sommarlov', 'sportlov', 'helgvisning']):
         return "Families", "families"
     
     # Check for children-specific keywords
@@ -137,11 +273,67 @@ class UnifiedEventSpider(scrapy.Spider):
         "https://www.modernamuseet.se/stockholm/sv/kalender/",
         "https://www.nationalmuseum.se/kalendarium"
     ]
+    
+    def __init__(self, url=None, days=30, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.url = url
+        self.scrape_days = int(days)  # Configurable days parameter (default 30)
+
+    def extract_age_limit(self, description):
+        """
+        Extract age limit from description text.
+        Looks for patterns like "7-9 år", "7-9 years", "från 7 år", etc.
+        Returns standardized age limit string or empty string if not found.
+        """
+        if not description:
+            return ""
+        
+        description_lower = description.lower()
+        
+        # Pattern 1: Age range like "7-9 år" or "7-9 years"
+        age_range_match = re.search(r'(\d+)\s*[-–]\s*(\d+)\s*(år|years?)', description_lower)
+        if age_range_match:
+            min_age = age_range_match.group(1)
+            max_age = age_range_match.group(2)
+            return f"{min_age}-{max_age}"
+        
+        # Pattern 2: Minimum age like "från 7 år" or "from 7 years"
+        min_age_match = re.search(r'(från|from)\s+(\d+)\s*(år|years?)', description_lower)
+        if min_age_match:
+            min_age = min_age_match.group(2)
+            return f"{min_age}+"
+        
+        # Pattern 3: Age range with "för dig X-Y år" like "för dig 7-9 år"
+        for_you_match = re.search(r'för\s+dig\s+(\d+)\s*[-–]\s*(\d+)\s*(år|years?)', description_lower)
+        if for_you_match:
+            min_age = for_you_match.group(1)
+            max_age = for_you_match.group(2)
+            return f"{min_age}-{max_age}"
+        
+        # Pattern 4: Single age with "år" like "7 år" (less common but possible)
+        single_age_match = re.search(r'(\d+)\s*(år|years?)(?![\s-])', description_lower)
+        if single_age_match:
+            age = single_age_match.group(1)
+            return f"{age}"
+        
+        # Pattern 5: Age in target group format like "För dig 7-9 år"
+        target_age_match = re.search(r'för\s+dig\s+(\d+)\s*[-–]\s*(\d+)\s*år', description_lower)
+        if target_age_match:
+            min_age = target_age_match.group(1)
+            max_age = target_age_match.group(2)
+            return f"{min_age}-{max_age}"
+        
+        # Pattern 6: Under age like "under 19 år" or "under19 years" (no space)
+        under_age_match = re.search(r'under\s*(\d+)\s*(år|years?)', description_lower)
+        if under_age_match:
+            max_age = under_age_match.group(2)
+            return f"0-{max_age}"
+        
+        return ""
 
     def start_requests(self):
         self.db = DatabaseManager()
-        single_url = getattr(self, 'url', None)
-        urls = [single_url] if single_url else self.start_urls
+        urls = [self.url] if self.url else self.start_urls
         for url in urls:
             if "tekniskamuseet.se" in url:
                 headers = {
@@ -154,6 +346,20 @@ class UnifiedEventSpider(scrapy.Spider):
                     'Upgrade-Insecure-Requests': '1',
                 }
                 yield scrapy.Request(url, headers=headers, meta={"playwright": True, "playwright_include_page": True, "playwright_page_methods": [PageMethod("wait_for_timeout", 15000), PageMethod("wait_for_load_state", "networkidle"), PageMethod("wait_for_timeout", 8000)], "handle_httpstatus_list": [403, 429]}, callback=self.parse, dont_filter=True)
+            elif "biblioteket.stockholm.se" in url:
+                # Use domcontentloaded for Stockholm library sites - NO additional wait
+                # Just proceed immediately after DOM is ready
+                yield scrapy.Request(url, meta={
+                    "playwright": True, 
+                    "playwright_include_page": True, 
+                    "playwright_page_methods": [
+                        PageMethod("wait_for_load_state", "domcontentloaded")
+                        # Removed wait_for_timeout - proceed immediately
+                    ],
+                    "playwright_context_kwargs": {
+                        "default_navigation_timeout": 30000  # 30 second timeout
+                    }
+                }, callback=self.parse)
             else:
                 yield scrapy.Request(url, meta={"playwright": True, "playwright_include_page": True, "playwright_page_methods": [PageMethod("wait_for_load_state", "networkidle"), PageMethod("wait_for_timeout", 3000)]}, callback=self.parse)
 
@@ -196,7 +402,7 @@ class UnifiedEventSpider(scrapy.Spider):
             return
 
         # Iterate day-by-day (Skansen is a true calendar)
-        for day_num in range(30):
+        for day_num in range(self.scrape_days):
             # 1️⃣ Get currently selected calendar date
             try:
                 date_el = page.locator(".calendarTopBar__dropdownButton span.p")
@@ -228,6 +434,29 @@ class UnifiedEventSpider(scrapy.Spider):
 
             # 3️⃣ Extract events FOR THIS DAY ONLY (if any exist)
             if events_found:
+                # Scroll to bottom to load all events (lazy loading)
+                try:
+                    max_scrolls = 10  # Increased from 5
+                    for scroll_attempt in range(max_scrolls):
+                        # Count current events before scrolling
+                        current_count = await page.locator("ul.calendarList__list li.calendarItem").count()
+                        
+                        # Scroll to bottom
+                        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                        await page.wait_for_timeout(1500)  # Increased wait time for lazy loading
+                        
+                        # Check if new events loaded
+                        new_count = await page.locator("ul.calendarList__list li.calendarItem").count()
+                        if new_count == current_count:
+                            # No new events loaded, we've reached the end
+                            self.logger.info(f"Stopped scrolling at {new_count} events (no new events loaded)")
+                            break
+                    
+                    final_count = await page.locator("ul.calendarList__list li.calendarItem").count()
+                    self.logger.info(f"Loaded {final_count} events for {current_date} after {scroll_attempt + 1} scroll attempts")
+                except Exception as e:
+                    self.logger.warning(f"Error during scroll loading: {e}")
+                
                 extracted = await self.extract_with_selectors(page, selectors)
 
                 for item_data in extracted:
@@ -243,7 +472,7 @@ class UnifiedEventSpider(scrapy.Spider):
                     item['end_date_iso'] = 'N/A'  # IMPORTANT: Skansen has NO ranges
                     item['time'] = extract_time_only(item_data.get('time'))
                     item['description'] = item_data.get('description') or 'N/A'
-                    item['location'] = extract_location_from_title(name)
+                    item['location'] = extract_skansen_location(name, item['description'])
 
                     tg = item_data.get('target_group')
                     item['target_group'] = tg or 'All'
@@ -251,6 +480,8 @@ class UnifiedEventSpider(scrapy.Spider):
 
                     item['status'] = detect_cancelled_status(name, item['description'])
                     item['booking_info'] = 'N/A'
+                    item['image_url'] = item_data.get('image_url')
+                    item['age_limit'] = 'N/A'  # Set to N/A for Skansen
 
                     yield item
 
@@ -310,9 +541,9 @@ class UnifiedEventSpider(scrapy.Spider):
                 await page.close()
                 return
 
-            # 2️⃣ Filter next 30 days
+            # 2️⃣ Filter next N days based on scrape_days parameter
             today = datetime.now().date()
-            limit = today + timedelta(days=30)
+            limit = today + timedelta(days=self.scrape_days)
 
             relevant_dates = []
             for d in calendar_dates:
@@ -324,7 +555,7 @@ class UnifiedEventSpider(scrapy.Spider):
                     continue
 
             relevant_dates.sort()
-            self.logger.info(f"Tekniska: {len(relevant_dates)} dates in next 30 days")
+            self.logger.info(f"Tekniska: {len(relevant_dates)} dates in next {self.scrape_days} days")
 
             seen = set()
 
@@ -344,10 +575,29 @@ class UnifiedEventSpider(scrapy.Spider):
                     link = await card.locator(sel['event_url']).get_attribute("href")
                     event_url = response.urljoin(link)
 
-
+                    # --- IMAGE EXTRACTION LOGIC ---
+                    image_url = None
+                    try:
+                        # 1. Try DB selector for the card image
+                        img_sel = sel.get('image_url', 'img.wp-post-image')
+                        img_el = card.locator(img_sel).first
+                        
+                        if await img_el.count() > 0:
+                            # Try standard src, then data-src for lazy-loading
+                            image_url = await img_el.get_attribute('src') or await img_el.get_attribute('data-src')
+                        
+                        # 2. Fallback: If no image in card, grab the general site metadata image
+                        if not image_url:
+                            meta_img = page.locator('meta[property="og:image"]').first
+                            if await meta_img.count() > 0:
+                                image_url = await meta_img.get_attribute('content')
+                    except Exception as e:
+                        self.logger.debug(f"Image extraction failed for Tekniska event {name}: {e}")
+                    # ------------------------------
                     
-                    # TARGET GROUP
+                    # TARGET GROUP AND AGE LIMIT
                     target_parts = []
+                    age_limit = 'N/A'  # Store the raw age range separately
 
                     # Age-based target group (best)
                     try:
@@ -356,6 +606,7 @@ class UnifiedEventSpider(scrapy.Spider):
                             age_txt = (await age_el.first.inner_text()).strip()
                             if age_txt:
                                 target_parts.append(age_txt)
+                                age_limit = age_txt  # Store the raw age value (e.g., "0-6", "8+", "12-15")
                     except:
                         pass
 
@@ -404,31 +655,31 @@ class UnifiedEventSpider(scrapy.Spider):
                         else:
                             continue  # Skip if no calendar date available
                     
-                    # Filter to only include events within next 1 month
+                    # Filter to only include events within scrape_days
                     try:
                         event_date = datetime.strptime(date_to_use, "%Y-%m-%d").date()
                         today = datetime.now().date()
-                        one_month_later = today + timedelta(days=30)
+                        date_limit = today + timedelta(days=self.scrape_days)
                         
-                        # Check if event starts within next month OR if it has an end date that overlaps
+                        # Check if event starts within date range OR if it has an end date that overlaps
                         event_in_range = False
                         
-                        if today <= event_date <= one_month_later:
-                            # Event starts within next month
+                        if today <= event_date <= date_limit:
+                            # Event starts within date range
                             event_in_range = True
                         elif end_date and end_date != 'N/A':
-                            # Check if event is ongoing during next month
+                            # Check if event is ongoing during date range
                             try:
                                 end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
-                                if event_date <= one_month_later and end_dt >= today:
-                                    # Event overlaps with next month period
+                                if event_date <= date_limit and end_dt >= today:
+                                    # Event overlaps with date range period
                                     event_in_range = True
-                                    self.logger.info(f"Event {name} overlaps with next month: {event_date} to {end_date}")
+                                    self.logger.info(f"Event {name} overlaps with date range: {event_date} to {end_date}")
                             except ValueError:
                                 pass
                         
                         if not event_in_range:
-                            self.logger.info(f"Skipping event {name} on {date_to_use} - outside next 1 month range")
+                            self.logger.info(f"Skipping event {name} on {date_to_use} - outside {self.scrape_days} day range")
                             continue
                     except ValueError:
                         self.logger.warning(f"Invalid date format {date_to_use} for event {name}")
@@ -455,15 +706,25 @@ class UnifiedEventSpider(scrapy.Spider):
                     except:
                         pass
                     
-                    location = "Tekniska museet"
+                    # LOCATION EXTRACTION FOR TEKNISKA MUSEET
+                    # Two main locations:
+                    # 1. Main museum: Museivägen 7, Stockholm (Norra Djurgården)
+                    # 2. Tensta branch: Hagstråket 11, Tensta
+                    location = "Tekniska museet, Museivägen 7"  # Default to main museum
+                    
                     try:
-                        loc_el = card.locator(sel.get('location'))
-                        if await loc_el.count() > 0:
-                            txt = (await loc_el.first.inner_text()).strip()
-                            if txt:
-                                location = txt
-                    except:
-                        pass
+                        # Check the event type label for "Tensta" indicator
+                        type_label_el = card.locator('.event-archive-item-type span')
+                        if await type_label_el.count() > 0:
+                            type_label_txt = (await type_label_el.first.inner_text()).strip().lower()
+                            if 'tensta' in type_label_txt:
+                                location = "Tekniska museet - Tensta, Hagstråket 11"
+                        
+                        # Also check the event title for "Tensta" (e.g., "Helgäventyr i Tensta")
+                        if 'tensta' in name.lower():
+                            location = "Tekniska museet - Tensta, Hagstråket 11"
+                    except Exception as e:
+                        self.logger.debug(f"Location extraction fallback for Tekniska: {e}")
 
                     item = EventCategoryItem()
                     item['event_name'] = name.strip()
@@ -478,6 +739,8 @@ class UnifiedEventSpider(scrapy.Spider):
                     item['target_group_normalized'] = target_group_normalized
                     item['status'] = detect_cancelled_status(name)
                     item['booking_info'] = 'N/A'
+                    item['image_url'] = image_url
+                    item['age_limit'] = age_limit  # Age range like "0-6", "8+", "12-15"
 
                     yield item
                         
@@ -505,7 +768,7 @@ class UnifiedEventSpider(scrapy.Spider):
         s = scrapy.Selector(text=content)
         days = s.css('.calendar__day')
         today = datetime.now().date()
-        limit = today + timedelta(days=45)
+        limit = today + timedelta(days=self.scrape_days)
         for day in days:
             date_str = day.attrib.get('data-date')
             if not date_str:
@@ -525,7 +788,13 @@ class UnifiedEventSpider(scrapy.Spider):
                 item['event_url'] = response.urljoin(event.css(sel_items.get('event_url', '::attr(href)')).get() or '')
                 item['time'] = extract_time_only(event.css(sel_items.get('time', 'time::text')).get())
                 item['description'] = (event.css(sel_items.get('description', 'p::text')).get() or 'N/A').strip()
-                item['location'] = (event.css(sel_items.get('location', '.calendar__item-share li a::text')).get() or 'Moderna Museet').strip()
+                # Location extraction: prioritize the specific location link (contains 'karta-museet' in href)
+                # The .read-more class links are exhibition names, not locations
+                location_text = event.css('.calendar__item-share a[href*="karta-museet"]::text').get()
+                if not location_text:
+                    # Try alternative: links that are not .read-more and not .facebook
+                    location_text = event.css('.calendar__item-share li a:not(.read-more):not(.facebook)::text').get()
+                item['location'] = (location_text or 'Moderna Museet').strip()
                 item['date_iso'] = date_str
                 item['date'] = date_str
                 item['end_date_iso'] = 'N/A'
@@ -537,16 +806,49 @@ class UnifiedEventSpider(scrapy.Spider):
                 
                 item['status'] = detect_cancelled_status(title, item['description'])
                 item['booking_info'] = 'N/A'
+                # Use the 'event' selector to find the image INSIDE the current event block
+                image_selector = sel_items.get('image_url', '.calendar__item-thumbnail img::attr(src)')
+                img = event.css(image_selector).get()
+
+                # Fallback: If no image in the block, try the metadata (og:image) from the full page 's'
+                if not img:
+                    img = s.css('meta[property="og:image"]::attr(content)').get()
+
+                item['image_url'] = img
+                
+                # Extract age limit from description for Moderna Museet
+                item['age_limit'] = self.extract_age_limit(item['description']) or 'N/A'
+                
                 yield item
         await page.close()
 
     async def handle_armemuseum(self, page, response):
-        cards = await page.evaluate("""() => {const c = []; const links = Array.from(document.querySelectorAll('a[href*="/event/"]')); links.forEach(l => {const n = l.querySelector('span.font-mulish.font-black'); const d = l.querySelector('span.text-xs.leading-7.font-roboto') || l.querySelector('span.font-roboto'); if (n && d && l.href.includes('/event/')) {c.push({name: n.innerText.trim(), dateRange: d.innerText.trim(), url: l.href})}}); const seen = new Set(); return c.filter(x => {if (seen.has(x.url)) return false; seen.add(x.url); return true})}""")
+        # Extract cards with image URLs
+        cards = await page.evaluate("""() => {
+            const c = []; 
+            const links = Array.from(document.querySelectorAll('a[href*="/event/"]')); 
+            links.forEach(l => {
+                const n = l.querySelector('span.font-mulish.font-black'); 
+                const d = l.querySelector('span.text-xs.leading-7.font-roboto') || l.querySelector('span.font-roboto'); 
+                const img = l.querySelector('img');
+                if (n && d && l.href.includes('/event/')) {
+                    c.push({
+                        name: n.innerText.trim(), 
+                        dateRange: d.innerText.trim(), 
+                        url: l.href,
+                        imageUrl: img ? img.src : null
+                    })
+                }
+            }); 
+            const seen = new Set(); 
+            return c.filter(x => {if (seen.has(x.url)) return false; seen.add(x.url); return true})
+        }""")
         await page.close()
         for card in cards:
             name = card.get('name', 'Unknown')
             dr = card.get('dateRange', '')
             url = card.get('url', '')
+            image_url = card.get('imageUrl')
             date_iso = None
             end_iso = None
             if ' - ' in dr:
@@ -557,7 +859,15 @@ class UnifiedEventSpider(scrapy.Spider):
                 date_iso = parse_swedish_date(dr)
             if not date_iso:
                 continue
-            yield scrapy.Request(url, callback=self.parse_arme_detail, dont_filter=True, meta={'playwright': True, 'playwright_include_page': True, 'playwright_page_methods': [PageMethod("wait_for_load_state", "domcontentloaded")], 'event_name': name, 'date_iso': date_iso, 'end_date_iso': end_iso})
+            yield scrapy.Request(url, callback=self.parse_arme_detail, dont_filter=True, meta={
+                'playwright': True, 
+                'playwright_include_page': True, 
+                'playwright_page_methods': [PageMethod("wait_for_load_state", "domcontentloaded")], 
+                'event_name': name, 
+                'date_iso': date_iso, 
+                'end_date_iso': end_iso,
+                'image_url': image_url
+            })
 
     async def parse_arme_detail(self, response):
         import re
@@ -565,13 +875,25 @@ class UnifiedEventSpider(scrapy.Spider):
         name = response.meta.get('event_name')
         date_iso = response.meta.get('date_iso')
         end_iso = response.meta.get('end_date_iso')
+        image_url = response.meta.get('image_url')  # Get image from listing page
         if not name or not date_iso:
             if page:
                 await page.close()
             return
         desc = 'N/A'
         time_info = 'N/A'
+        event_type_label = ''  # For target group like "FAMILJEVISNING", "SPORTLOV"
         if page:
+            # Extract event type label (e.g., "FAMILJEVISNING", "SPORTLOV")
+            # This is displayed above the title and indicates target group
+            try:
+                label_el = page.locator('div.text-xl.uppercase.mb-4, div.font-roboto.uppercase')
+                if await label_el.count() > 0:
+                    event_type_label = (await label_el.first.inner_text()).strip()
+                    self.logger.info(f"Found event type label for {name}: {event_type_label}")
+            except Exception as e:
+                self.logger.debug(f"Could not extract event type label: {e}")
+            
             # Extract description
             desc_els = page.locator('.richtext p')
             if await desc_els.count() > 0:
@@ -627,9 +949,10 @@ class UnifiedEventSpider(scrapy.Spider):
             
             # NEW: Check for recurring events (Fler datum section) AND main event date
             try:
-                occurrences = []
+                # Dictionary to group times by date: {date: [time1, time2, ...]}
+                occurrences_dict = {}
                 
-                # First, extract the main event date (the 17th you're missing!)
+                # First, extract the main event date
                 try:
                     main_date_elements = await page.locator('span.ml-8.py-4.text-text.text-5xl').all()
                     for element in main_date_elements:
@@ -640,7 +963,10 @@ class UnifiedEventSpider(scrapy.Spider):
                             if parsed_date:
                                 # Extract time for this main date if available
                                 main_time = time_info  # Use the time extracted earlier
-                                occurrences.append((parsed_date, main_time))
+                                if parsed_date not in occurrences_dict:
+                                    occurrences_dict[parsed_date] = []
+                                if main_time and main_time != 'N/A':
+                                    occurrences_dict[parsed_date].append(main_time)
                                 self.logger.info(f"Found main event date: {parsed_date} at {main_time}")
                                 break  # Take the first valid main date
                         except Exception as e:
@@ -650,49 +976,81 @@ class UnifiedEventSpider(scrapy.Spider):
                     self.logger.warning(f"Error extracting main date: {e}")
                 
                 # Then, extract additional dates from "Fler datum" section
-                fler_datum_list = page.locator('ul.richtext')
-                fler_datum_count = await fler_datum_list.count()
+                # Try multiple selectors as the structure varies
+                fler_datum_sections = [
+                    'ul.richtext',  # Standard list
+                    'div:has-text("FLER DATUM FÖR EVENEMANGET") + *',  # Section after header
+                    'div.richtext:has(ul)',  # Richtext containing ul
+                ]
                 
-                if fler_datum_count > 0:
-                    self.logger.info(f"Found 'Fler datum' section for {name}, extracting additional occurrence dates")
-                    
-                    # Get additional dates from list
-                    list_items = fler_datum_list.locator('li.list-none')
-                    count = await list_items.count()
-                    
-                    for i in range(count):
-                        try:
-                            li = list_items.nth(i)
-                            date_span = await li.locator('span.text-4xl').inner_text()
-                            time_span = await li.locator('span.text-xl').inner_text()
+                for selector in fler_datum_sections:
+                    try:
+                        fler_datum_list = page.locator(selector)
+                        fler_datum_count = await fler_datum_list.count()
+                        
+                        if fler_datum_count > 0:
+                            self.logger.info(f"Found 'Fler datum' section with selector '{selector}' for {name}")
                             
-                            # Parse Swedish date format
-                            parsed_date = parse_swedish_date(date_span.strip())
-                            parsed_time = time_span.strip() if time_span else time_info
+                            # Get all list items that contain dates
+                            list_items = fler_datum_list.locator('li.list-none, li')
+                            count = await list_items.count()
                             
-                            if parsed_date:
-                                occurrences.append((parsed_date, parsed_time))
-                        except Exception as e:
-                            self.logger.warning(f"Could not parse occurrence {i}: {e}")
-                            continue
-                    
-                    # Yield separate events for each occurrence (including main event date)
-                if occurrences:
-                    self.logger.info(f"Yielding {len(occurrences)} occurrence(s) for {name}")
-                    for occurrence_date, occurrence_time in occurrences:
+                            for i in range(count):
+                                try:
+                                    li = list_items.nth(i)
+                                    li_text = await li.inner_text()
+                                    
+                                    # Look for date and time patterns
+                                    date_span = await li.locator('span.text-4xl, span:has-text("februari"), span:has-text("mars")').first.inner_text() if await li.locator('span.text-4xl, span:has-text("februari"), span:has-text("mars")').count() > 0 else None
+                                    
+                                    if date_span:
+                                        # Parse Swedish date format
+                                        parsed_date = parse_swedish_date(date_span.strip())
+                                        
+                                        # Extract time - look for span with time or parse from text
+                                        time_match = re.search(r'\b(\d{1,2}:\d{2})\b', li_text)
+                                        parsed_time = time_match.group(1) if time_match else time_info
+                                        
+                                        if parsed_date:
+                                            if parsed_date not in occurrences_dict:
+                                                occurrences_dict[parsed_date] = []
+                                            if parsed_time and parsed_time != 'N/A' and parsed_time not in occurrences_dict[parsed_date]:
+                                                occurrences_dict[parsed_date].append(parsed_time)
+                                except Exception as e:
+                                    self.logger.warning(f"Could not parse occurrence {i}: {e}")
+                                    continue
+                            
+                            if occurrences_dict:
+                                break  # Found dates, no need to try other selectors
+                    except Exception as e:
+                        self.logger.debug(f"Selector '{selector}' didn't work: {e}")
+                        continue
+                
+                # Yield separate events for each date with combined times
+                if occurrences_dict:
+                    self.logger.info(f"Yielding {len(occurrences_dict)} date(s) for {name}")
+                    for occurrence_date, times_list in sorted(occurrences_dict.items()):
+                        # Combine multiple times into comma-separated string
+                        combined_time = ', '.join(sorted(set(times_list))) if times_list else time_info
+                        
                         item = EventCategoryItem()
                         item['event_name'] = name
                         item['event_url'] = response.url
                         item['date_iso'] = occurrence_date
                         item['date'] = occurrence_date
                         item['end_date_iso'] = 'N/A'  # Single occurrence
-                        item['time'] = occurrence_time if occurrence_time and occurrence_time != 'N/A' else time_info
+                        item['time'] = combined_time if combined_time else 'N/A'
                         item['location'] = "Armémuseum"
                         item['description'] = desc
-                        item['target_group'] = "All"
-                        item['target_group_normalized'] = 'all_ages'
+                        # Extract target group from event name, description, AND event type label
+                        combined_text = f"{desc} {event_type_label}"
+                        target_group, target_group_normalized = extract_target_group_from_name(name, combined_text)
+                        item['target_group'] = target_group
+                        item['target_group_normalized'] = target_group_normalized
                         item['status'] = detect_cancelled_status(name, desc)
                         item['booking_info'] = 'N/A'
+                        item['image_url'] = image_url
+                        item['age_limit'] = 'N/A'  # Set to N/A for Armemuseum
                         yield item
                     
                     await page.close()
@@ -714,39 +1072,62 @@ class UnifiedEventSpider(scrapy.Spider):
         item['time'] = time_info
         item['location'] = "Armémuseum"
         item['description'] = desc
-        item['target_group'] = "All"
-        item['target_group_normalized'] = 'all_ages'
+        # Extract target group from event name, description, AND event type label
+        combined_text = f"{desc} {event_type_label}"
+        target_group, target_group_normalized = extract_target_group_from_name(name, combined_text)
+        item['target_group'] = target_group
+        item['target_group_normalized'] = target_group_normalized
         item['status'] = detect_cancelled_status(name, desc)
         item['booking_info'] = 'N/A'
+        item['image_url'] = image_url
+        item['age_limit'] = 'N/A'  # Set to N/A for Armemuseum
         yield item
 
     async def handle_generic(self, page, response):
         # Scroll and click "load more" buttons to get all events
-        # Increased iterations for Stockholm library to load full month of events
-        max_iterations = 25 if "biblioteket.stockholm.se" in response.url else 20
+        # Calculate max iterations based on scrape_days to ensure we load enough events
+        # Stockholm library typically shows ~25-30 events per page, each click loads ~10-15 more
+        # For 10 days with ~30 events/day = 300 events, need ~30+ clicks to be safe
+        if "biblioteket.stockholm.se" in response.url:
+            # For Stockholm: base of 15 clicks + 2 clicks per day, capped at 50 max
+            max_iterations = min(50, max(30, 15 + (self.scrape_days * 2)))
+        else:
+            max_iterations = 20
         
         for _ in range(4):
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             await page.wait_for_timeout(1000)
         
-        self.logger.info(f"Starting load more loop (max {max_iterations} iterations)")
+        self.logger.info(f"Starting load more loop (max {max_iterations} iterations for {self.scrape_days} days)")
+        consecutive_failures = 0
         for i in range(max_iterations):
             clicked = False
             for word in ["Visa fler", "Ladda fler", "Load more", "Visa mer"]:
                 try:
                     btn = page.locator(f"button:has-text('{word}'), a:has-text('{word}')").first
                     if await btn.count() > 0 and await btn.is_visible():
-                        self.logger.info(f"Clicking '{word}' button (iteration {i+1})")
+                        self.logger.info(f"Clicking '{word}' button (iteration {i+1}/{max_iterations})")
                         await btn.click(force=True, timeout=3000)
-                        await page.wait_for_timeout(1500)
+                        # Wait longer and scroll to allow content to load
+                        await page.wait_for_timeout(2500)
+                        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                        await page.wait_for_timeout(1000)
                         clicked = True
+                        consecutive_failures = 0
                         break
                 except Exception as e:
                     self.logger.debug(f"Error clicking '{word}' button: {e}")
                     continue
             if not clicked:
-                self.logger.info(f"No more load buttons found, stopping after {i+1} iterations")
-                break
+                consecutive_failures += 1
+                # Try scrolling to trigger lazy loading before giving up
+                if consecutive_failures <= 3:
+                    self.logger.info(f"No load button found, scrolling to try loading more (attempt {consecutive_failures}/3)")
+                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    await page.wait_for_timeout(2000)
+                else:
+                    self.logger.info(f"No more load buttons found after {consecutive_failures} attempts, stopping after {i+1} iterations")
+                    break
         
         selectors = self.db.get_selectors(response.url)
         if not selectors:
@@ -763,7 +1144,7 @@ class UnifiedEventSpider(scrapy.Spider):
         extracted = await self.extract_with_selectors(page, selectors)
         await page.close()
         today = datetime.now().date()
-        limit = today + timedelta(days=30)
+        limit = today + timedelta(days=self.scrape_days)
         for data in extracted:
             raw = data.get('date_iso')
             if not raw:
@@ -791,6 +1172,8 @@ class UnifiedEventSpider(scrapy.Spider):
             if "Datum:" in booking_raw:
                 booking_raw = booking_raw.split("Datum:")[0].strip()
             item['booking_info'] = extract_booking_info(booking_raw)
+            item['image_url'] = data.get('image_url')
+            item['age_limit'] = 'N/A'  # Set to N/A for generic sites
             if "forskolor" in response.url:
                 item['target_group'] = "Preschool"
                 item['target_group_normalized'] = "preschool_groups"
@@ -814,7 +1197,15 @@ class UnifiedEventSpider(scrapy.Spider):
         extracted = await self.extract_with_selectors(page, selectors)
         await page.close()
         today = datetime.now().date()
-        limit = today + timedelta(days=30)
+        limit = today + timedelta(days=self.scrape_days)
+        
+        # Track date coverage for debugging
+        dates_seen = set()
+        events_yielded = 0
+        events_skipped_past = 0
+        events_skipped_future = 0
+        
+        self.logger.info(f"Stockholm Library: Processing {len(extracted)} extracted events for date range {today} to {limit}")
         
         for data in extracted:
             raw = data.get('date_iso')
@@ -843,35 +1234,15 @@ class UnifiedEventSpider(scrapy.Spider):
                 
                 # If end has explicit year but start doesn't, we need to figure out start's year
                 if has_explicit_year and not start_has_explicit_year:
-                    current_year = today.year
-                    
-                    # For multi-year events, try to find a year that makes the event currently active
-                    # Try years from end_year down to current_year-1
-                    possible_years = [end_year, end_year - 1, end_year - 2, current_year, current_year - 1]
-                    best_start_date = None
-                    
-                    for try_year in possible_years:
-                        try_start = f"{try_year}-{start_month:02d}-{start_day}"
-                        try:
-                            try_start_dt = datetime.strptime(try_start, "%Y-%m-%d").date()
-                            end_dt_check = datetime.strptime(end_date, "%Y-%m-%d").date()
-                            
-                            # Check if this year makes the event currently active (ongoing)
-                            if try_start_dt <= today <= end_dt_check:
-                                best_start_date = try_start
-                                self.logger.info(f"Found ongoing event: start {try_start} <= today <= end {end_date}")
-                                break
-                        except ValueError:
-                            continue
-                    
-                    # If no ongoing match found, use the most reasonable year
-                    if not best_start_date:
-                        if start_month > end_month:
-                            # Start month is after end month, so start is in previous year
-                            best_start_date = f"{end_year - 1}-{start_month:02d}-{start_day}"
-                        else:
-                            # Default: same year as end
-                            best_start_date = f"{end_year}-{start_month:02d}-{start_day}"
+                    # Simple logic: determine if this is a year-crossing range
+                    if start_month > end_month:
+                        # Year boundary crossing (e.g., "15 dec - 15 jan 2026")
+                        # Start is in previous year
+                        best_start_date = f"{end_year - 1}-{start_month:02d}-{start_day}"
+                    else:
+                        # Same calendar year range (e.g., "2 feb - 6 feb 2026")
+                        # Start is in same year as end
+                        best_start_date = f"{end_year}-{start_month:02d}-{start_day}"
                     
                     start_date = best_start_date
                     self.logger.info(f"Adjusted start date to {start_date} based on end date {end_date}")
@@ -882,13 +1253,19 @@ class UnifiedEventSpider(scrapy.Spider):
             start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
             end_dt = datetime.strptime(end_date, "%Y-%m-%d").date() if end_date else start_dt
 
+            # Track dates seen for debugging
+            dates_seen.add(start_date)
+
             # ✅ Correct overlap logic
             if end_dt < today:
+                events_skipped_past += 1
                 continue  # Event already finished
 
             if start_dt > limit:
+                events_skipped_future += 1
                 continue  # Event starts too far in future
             
+            events_yielded += 1
             # Extract target audience from event detail page using regular HTTP (fast!)
             event_url = response.urljoin(data.get('event_url', ''))
             yield scrapy.Request(event_url, callback=self.parse_stockholm_library_detail, dont_filter=True, meta={
@@ -897,6 +1274,12 @@ class UnifiedEventSpider(scrapy.Spider):
                 'end_date': end_date,
                 'source_url': response.url
             })
+        
+        # Log summary of date coverage
+        sorted_dates = sorted(dates_seen)
+        self.logger.info(f"Stockholm Library: Yielded {events_yielded} events, skipped {events_skipped_past} past, {events_skipped_future} future")
+        self.logger.info(f"Stockholm Library: Date range seen: {sorted_dates[0] if sorted_dates else 'none'} to {sorted_dates[-1] if sorted_dates else 'none'}")
+        self.logger.info(f"Stockholm Library: All unique dates ({len(sorted_dates)}): {sorted_dates[:15]}{'...' if len(sorted_dates) > 15 else ''}")
 
     def parse_stockholm_library_detail(self, response):
         data = response.meta.get('data')
@@ -948,6 +1331,11 @@ class UnifiedEventSpider(scrapy.Spider):
                 item['target_group_normalized'] = 'all_ages'
         
         item['booking_info'] = extract_booking_info(data.get('booking_status', ''))
+        item['image_url'] = data.get('image_url')
+        
+        # Extract age limit from description, default to N/A if not found
+        age_limit = self.extract_age_limit(desc)
+        item['age_limit'] = age_limit if age_limit else 'N/A'
 
         yield item
 
@@ -970,6 +1358,7 @@ class UnifiedEventSpider(scrapy.Spider):
                         break
             await page.close()
         item['description'] = desc
+        item['age_limit'] = 'N/A'  # Set to N/A for general detail parsing
         yield item
 
     async def extract_with_selectors(self, page, selectors):
@@ -1013,6 +1402,26 @@ class UnifiedEventSpider(scrapy.Spider):
                                 continue
                         item[field] = txt if txt else None
                         continue
+                    
+                    # Handle image_url extraction - look for src attribute on img tags
+                    if field == 'image_url':
+                        target = el.locator(sel).first
+                        if await target.count() > 0:
+                            # Try to get src attribute from img tag
+                            src = await target.get_attribute('src')
+                            if not src:
+                                # Try data-src for lazy-loaded images
+                                src = await target.get_attribute('data-src')
+                            if not src:
+                                # Try srcset and get first URL
+                                srcset = await target.get_attribute('srcset')
+                                if srcset:
+                                    src = srcset.split(',')[0].split()[0]
+                            item[field] = src if src else None
+                        else:
+                            item[field] = None
+                        continue
+                    
                     target = el.locator(sel).first
                     if await target.count() > 0:
                         val = None
@@ -1067,8 +1476,6 @@ class UnifiedEventSpider(scrapy.Spider):
             min_age = int(age_range.group(1))
             max_age = int(age_range.group(2))
             if max_age <= 6:
-                return 'preschool'
-            elif max_age <= 11:
                 return 'children'
             elif min_age >= 10 and max_age <= 19:
                 return 'teens'

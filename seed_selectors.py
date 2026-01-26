@@ -73,7 +73,8 @@ def seed_selectors():
                 "location": "section > div:nth-child(4) p",
                 "target_group_raw": "section p",
                 "status_indicator": "div p",
-                "booking_status": "p"
+                "booking_status": "p",
+                "image_url": "img"
             }
         },
         
@@ -91,7 +92,8 @@ def seed_selectors():
                 "location": "section > div:nth-child(4) p",
                 "target_group_raw": "section p",
                 "status_indicator": "div p",
-                "booking_status": "p"
+                "booking_status": "p",
+                "image_url": "img"
             }
         },
         
@@ -105,7 +107,8 @@ def seed_selectors():
                 "event_url": ".calendarItem__titleLink",  # href attribute
                 "time": ".calendarItem__information p",
                 "description": ".calendarItem__description p",
-                "target_group": "ul.calendarItem__tags li.tag"
+                "target_group": "ul.calendarItem__tags li.tag",
+                "image_url": ".calendarItem__image"
             }
         },
         

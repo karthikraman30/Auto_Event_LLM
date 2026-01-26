@@ -5,6 +5,12 @@ from datetime import datetime, timedelta
 
 class DatabaseManager:
     def __init__(self, db_path="selectors.db"):
+        # If an absolute path is provided (e.g., for testing), use it directly
+        if os.path.isabs(db_path):
+            self.db_path = db_path
+            self._init_db()
+            return
+        
         # Compute absolute path to project root's selectors.db
         # db_manager.py is at: event_category/event_category/utils/db_manager.py
         # Project root is 3 levels up
@@ -31,7 +37,6 @@ class DatabaseManager:
         
         self._init_db()
 
-
     def _init_db(self):
         conn = sqlite3.connect(self.db_path, timeout=30.0)
         cursor = conn.cursor()
@@ -49,7 +54,7 @@ class DatabaseManager:
             )
         ''')
 
-        # Events Table with Upsert constraint
+        # Events Table with Upsert constraint (simplified schema - no soft-delete columns)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,21 +64,45 @@ class DatabaseManager:
                 end_date_iso TEXT,
                 time TEXT,
                 location TEXT,
-                target_group TEXT, 
-                target_group_normalized TEXT DEFAULT 'all_ages',
+                target_group TEXT,
+                target_group_normalized TEXT,
                 status TEXT,
                 booking_info TEXT,
                 description TEXT,
+                image_url TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_scraped TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                unique_key TEXT,
+                age_limit TEXT,
                 UNIQUE(event_name, date_iso, event_url, location)
             )
         ''')
         
-        # Add target_group_normalized column if it doesn't exist (for backward compatibility)
-        try:
-            cursor.execute("ALTER TABLE events ADD COLUMN target_group_normalized TEXT DEFAULT 'all_ages'")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
+        # Migration: Add new columns if they don't exist
+        cursor.execute("PRAGMA table_info(events)")
+        columns = [col[1] for col in cursor.fetchall()]
+        
+        if 'image_url' not in columns:
+            cursor.execute('ALTER TABLE events ADD COLUMN image_url TEXT')
+        
+        if 'created_at' not in columns:
+            # SQLite doesn't allow DEFAULT CURRENT_TIMESTAMP in ALTER TABLE
+            # Add column without default, then backfill with last_scraped
+            cursor.execute('ALTER TABLE events ADD COLUMN created_at TIMESTAMP')
+            cursor.execute('UPDATE events SET created_at = last_scraped WHERE created_at IS NULL')
+        
+        if 'unique_key' not in columns:
+            cursor.execute('ALTER TABLE events ADD COLUMN unique_key TEXT')
+        
+        if 'age_limit' not in columns:
+            cursor.execute('ALTER TABLE events ADD COLUMN age_limit TEXT')
+        
+        if 'target_group_normalized' not in columns:
+            cursor.execute('ALTER TABLE events ADD COLUMN target_group_normalized TEXT')
+        
+        # Migration: Drop old soft-delete columns if they exist (one-time cleanup)
+        # SQLite doesn't support DROP COLUMN directly, so we skip this for existing DBs
+        # New databases won't have these columns at all
         
         # Settings Table (key-value store)
         cursor.execute('''
@@ -105,6 +134,76 @@ class DatabaseManager:
                 warnings TEXT
             )
         ''')
+        
+        # Scrape Runs Table - tracks metadata for each scheduled scrape run
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS scrape_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                run_type TEXT NOT NULL,
+                window_days INTEGER NOT NULL,
+                events_scraped INTEGER DEFAULT 0,
+                events_marked_deleted INTEGER DEFAULT 0
+            )
+        ''')
+        
+        # Pending Changes Table (staging for incremental scraper)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS pending_changes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                change_type TEXT NOT NULL,
+                event_data TEXT NOT NULL,
+                unique_key TEXT NOT NULL,
+                event_name TEXT,
+                date_iso TEXT,
+                location TEXT,
+                detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                run_id TEXT
+            )
+        ''')
+        
+        # Scrape Failures Table - tracks URL-specific scraping failures
+        # This table persists failures across scrape runs for user notification
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS scrape_failures (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT NOT NULL,
+                url_name TEXT,
+                error_message TEXT NOT NULL,
+                error_type TEXT,
+                occurred_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                run_type TEXT,
+                resolved_at TIMESTAMP,
+                is_active INTEGER DEFAULT 1
+            )
+        ''')
+        
+        # Scheduler Settings Table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS scheduler_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Seed default scheduler settings if empty
+        cursor.execute("SELECT COUNT(*) FROM scheduler_settings")
+        if cursor.fetchone()[0] == 0:
+            scheduler_defaults = [
+                ("baseline_start_date", "", datetime.now().isoformat()),
+                ("baseline_interval_months", "1", datetime.now().isoformat()),
+                ("incremental_interval_days", "3", datetime.now().isoformat()),
+                ("last_baseline_run", "", datetime.now().isoformat()),
+                ("last_incremental_run", "", datetime.now().isoformat()),
+            ]
+            cursor.executemany("INSERT INTO scheduler_settings (key, value, updated_at) VALUES (?, ?, ?)", scheduler_defaults)
+        
+        # Create indexes for performance
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_events_dates ON events(date_iso, end_date_iso)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_events_last_scraped ON events(last_scraped)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_events_unique_key ON events(unique_key)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_pending_unique_key ON pending_changes(unique_key)')
         
         # Seed default URLs if table is empty
         cursor.execute("SELECT COUNT(*) FROM scraping_urls")
@@ -143,65 +242,119 @@ class DatabaseManager:
     # ==================== EVENTS ====================
     
     def upsert_event(self, event_data):
-        """Insert new event or update existing info (Deduplication)."""
-        print(f"[DEBUG] upsert_event: Starting for event: {event_data.get('event_name', 'Unknown')}")
-        print(f"[DEBUG] upsert_event: DB path: {self.db_path}")
+        """Insert new event or update existing info (Deduplication).
+        
+        For Stockholm library (biblioteket.stockholm.se) events, deduplication is disabled
+        to allow multiple events with the same name/date at different library branches.
+        """
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        
+        # Check if this is a Stockholm library event (skip deduplication for this site)
+        event_url = event_data.get('event_url', '')
+        is_stockholm_library = 'biblioteket.stockholm.se' in event_url
         
         try:
-            conn = sqlite3.connect(self.db_path, timeout=30.0)
-            cursor = conn.cursor()
-            print(f"[DEBUG] upsert_event: Database connected successfully")
+            if is_stockholm_library:
+                # For Stockholm library: Use deterministic hash as suffix to ensure uniqueness
+                # but allow updates if the SAME event is scraped again.
+                import hashlib
+                
+                # Create a unique signature for this event instance
+                # We use name + date + time + location to distinguish events at different branches/times
+                unique_str = f"{event_data.get('event_name')}_{event_data.get('date_iso')}_{event_data.get('time')}_{event_data.get('location')}"
+                unique_hash = hashlib.md5(unique_str.encode('utf-8')).hexdigest()[:8]
+                
+                # Append hash to URL to make it unique per time/location, but consistent across scrapes
+                unique_url = f"{event_url}#{unique_hash}"
+                
+                # Generate unique_key for this event
+                unique_key = self.generate_unique_key(event_data)
+                
+                # Use UPSERT logic just like regular events
+                cursor.execute('''
+                    INSERT INTO events (
+                            event_name, date_iso, event_url, end_date_iso, time, location, 
+                            target_group, target_group_normalized, status, booking_info, description, image_url, 
+                            unique_key, age_limit, created_at, last_scraped
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        ON CONFLICT(event_name, date_iso, event_url, location) DO UPDATE SET
+                            end_date_iso = excluded.end_date_iso,
+                            time = excluded.time,
+                            location = excluded.location,
+                            target_group = excluded.target_group,
+                            target_group_normalized = excluded.target_group_normalized,
+                            status = excluded.status,
+                            booking_info = excluded.booking_info,
+                            description = excluded.description,
+                            image_url = excluded.image_url,
+                            unique_key = excluded.unique_key,
+                            age_limit = excluded.age_limit,
+                            last_scraped = CURRENT_TIMESTAMP
+                ''', (
+                    event_data.get('event_name'),
+                    event_data.get('date_iso'),
+                    unique_url,  # Use the deterministic hashed URL
+                    event_data.get('end_date_iso'),
+                    event_data.get('time'),
+                    event_data.get('location'),
+                    event_data.get('target_group'),
+                    event_data.get('target_group_normalized'),
+                    event_data.get('status'),
+                    event_data.get('booking_info'),
+                    event_data.get('description'),
+                    event_data.get('image_url'),
+                    unique_key,
+                    event_data.get('age_limit', 'N/A'),
+                ))
+            else:
+                # Generate unique_key for this event
+                unique_key = self.generate_unique_key(event_data)
+                
+                # For all other sites: Use normal upsert with deduplication
+                cursor.execute('''
+                    INSERT INTO events (
+                            event_name, date_iso, event_url, end_date_iso, time, location, 
+                            target_group, target_group_normalized, status, booking_info, description, image_url, 
+                            unique_key, age_limit, created_at, last_scraped
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        ON CONFLICT(event_name, date_iso, event_url, location) DO UPDATE SET
+                            end_date_iso = excluded.end_date_iso,
+                            time = excluded.time,
+                            location = excluded.location,
+                            target_group = excluded.target_group,
+                            target_group_normalized = excluded.target_group_normalized,
+                            status = excluded.status,
+                            booking_info = excluded.booking_info,
+                            description = excluded.description,
+                            image_url = excluded.image_url,
+                            unique_key = excluded.unique_key,
+                            age_limit = excluded.age_limit,
+                            last_scraped = CURRENT_TIMESTAMP
+                ''', (
+                    event_data.get('event_name'),
+                    event_data.get('date_iso'),
+                    event_data.get('event_url'),
+                    event_data.get('end_date_iso'),
+                    event_data.get('time'),
+                    event_data.get('location'),
+                    event_data.get('target_group'),
+                    event_data.get('target_group_normalized'),
+                    event_data.get('status'),
+                    event_data.get('booking_info'),
+                    event_data.get('description'),
+                    event_data.get('image_url'),
+                    unique_key,
+                    event_data.get('age_limit', 'N/A'),
+                ))
         except Exception as e:
-            print(f"[DEBUG] upsert_event: Database connection failed: {e}")
-            raise
-        
-        try:
-            cursor.execute('''
-                INSERT INTO events (
-                        event_name, date_iso, event_url, end_date_iso, time, location, 
-                        target_group, target_group_normalized, status, booking_info, description, last_scraped
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    ON CONFLICT(event_name, date_iso, event_url, location) DO UPDATE SET
-                        end_date_iso = excluded.end_date_iso,
-                        time = excluded.time,
-                        location = excluded.location,
-                        target_group = excluded.target_group,
-                        target_group_normalized = excluded.target_group_normalized,
-                        status = excluded.status,
-                        booking_info = excluded.booking_info,
-                        description = excluded.description,
-                        last_scraped = CURRENT_TIMESTAMP
-            ''', (
-                event_data.get('event_name'),
-                event_data.get('date_iso'),
-                event_data.get('event_url'),
-                event_data.get('end_date_iso'),
-                event_data.get('time'),
-                event_data.get('location'),
-                event_data.get('target_group'),
-                event_data.get('target_group_normalized'),
-                event_data.get('status'),
-                event_data.get('booking_info'),
-                event_data.get('description'),
-            ))
-            print(f"[DEBUG] upsert_event: SQL executed successfully")
-        except Exception as e:
-            print(f"[DEBUG] upsert_event: SQL execution failed: {e}")
-            print(f"[DEBUG] upsert_event: Event data: {event_data}")
             conn.close()
             raise
         
-        try:
-            conn.commit()
-            print(f"[DEBUG] upsert_event: Transaction committed successfully")
-        except Exception as e:
-            print(f"[DEBUG] upsert_event: Commit failed: {e}")
-            conn.close()
-            raise
-            
+        conn.commit()
         conn.close()
-        print(f"[DEBUG] upsert_event: Completed successfully")
 
     def get_all_events(self):
         conn = sqlite3.connect(self.db_path, timeout=30.0)
@@ -434,13 +587,25 @@ class DatabaseManager:
         return count
 
     def get_events_next_month(self):
-        """Count events in the next 30 days."""
+        """Count events in the next calendar month (not including current month)."""
         conn = sqlite3.connect(self.db_path, timeout=30.0)
         cursor = conn.cursor()
-        today = datetime.now().strftime("%Y-%m-%d")
-        month_end = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
+        
+        # Get first day of next month
+        today = datetime.now()
+        if today.month == 12:
+            next_month_start = datetime(today.year + 1, 1, 1)
+            next_month_end = datetime(today.year + 1, 1, 31)
+        else:
+            next_month_start = datetime(today.year, today.month + 1, 1)
+            # Get last day of next month
+            if today.month + 1 == 12:
+                next_month_end = datetime(today.year, 12, 31)
+            else:
+                next_month_end = datetime(today.year, today.month + 2, 1) - timedelta(days=1)
+        
         cursor.execute("SELECT COUNT(*) FROM events WHERE date_iso >= ? AND date_iso <= ?", 
-                       (today, month_end))
+                       (next_month_start.strftime("%Y-%m-%d"), next_month_end.strftime("%Y-%m-%d")))
         count = cursor.fetchone()[0]
         conn.close()
         return count
@@ -640,6 +805,101 @@ class DatabaseManager:
         conn.close()
         return deleted
 
+    # ==================== SCRAPE FAILURES ====================
+    
+    def log_scrape_failure(self, url, url_name, error_message, error_type='UNKNOWN', run_type='manual'):
+        """Log a scraping failure for a specific URL.
+        
+        If there's already an active failure for this URL, update it instead of creating a new one.
+        """
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        
+        # Check if there's already an active failure for this URL
+        cursor.execute(
+            "SELECT id FROM scrape_failures WHERE url = ? AND is_active = 1",
+            (url,)
+        )
+        existing = cursor.fetchone()
+        
+        if existing:
+            # Update existing failure with latest error
+            cursor.execute('''
+                UPDATE scrape_failures 
+                SET error_message = ?, error_type = ?, occurred_at = CURRENT_TIMESTAMP, run_type = ?
+                WHERE id = ?
+            ''', (error_message, error_type, run_type, existing[0]))
+        else:
+            # Insert new failure
+            cursor.execute('''
+                INSERT INTO scrape_failures (url, url_name, error_message, error_type, run_type)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (url, url_name, error_message, error_type, run_type))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_active_failures(self):
+        """Get all active (unresolved) scraping failures."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, url, url_name, error_message, error_type, occurred_at, run_type
+            FROM scrape_failures 
+            WHERE is_active = 1
+            ORDER BY occurred_at DESC
+        ''')
+        rows = cursor.fetchall()
+        column_names = [description[0] for description in cursor.description]
+        failures = [dict(zip(column_names, row)) for row in rows]
+        conn.close()
+        return failures
+    
+    def resolve_failure(self, url):
+        """Mark a failure as resolved when the URL scrapes successfully."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE scrape_failures 
+            SET is_active = 0, resolved_at = CURRENT_TIMESTAMP
+            WHERE url = ? AND is_active = 1
+        ''', (url,))
+        resolved = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return resolved > 0
+    
+    def get_failure_history(self, days=7):
+        """Get failure history including resolved failures from the last N days."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute('''
+            SELECT id, url, url_name, error_message, error_type, occurred_at, run_type, resolved_at, is_active
+            FROM scrape_failures 
+            WHERE occurred_at >= ?
+            ORDER BY occurred_at DESC
+        ''', (cutoff,))
+        rows = cursor.fetchall()
+        column_names = [description[0] for description in cursor.description]
+        failures = [dict(zip(column_names, row)) for row in rows]
+        conn.close()
+        return failures
+    
+    def cleanup_old_failures(self, days=30):
+        """Remove old resolved failures to keep database clean."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute('''
+            DELETE FROM scrape_failures 
+            WHERE is_active = 0 AND resolved_at < ?
+        ''', (cutoff,))
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return deleted
+
     # ==================== ANALYTICS ====================
     
     def get_events_by_venue(self):
@@ -803,3 +1063,548 @@ class DatabaseManager:
         
         conn.commit()
         conn.close()
+
+    # ==================== UPDATES TAB (Sunday vs Wednesday Comparison) ====================
+    
+    def get_added_events_today(self):
+        """Get events where created_at matches today's date (newly added events)."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        cursor.execute('''
+            SELECT * FROM events 
+            WHERE DATE(created_at) = ?
+            ORDER BY event_url, date_iso
+        ''', (today,))
+        
+        rows = cursor.fetchall()
+        column_names = [description[0] for description in cursor.description]
+        events = [dict(zip(column_names, row)) for row in rows]
+        conn.close()
+        return events
+    
+    def get_deleted_events(self, days_ahead=10):
+        """
+        Get events in the next N days that were present in the previous Sunday scrape
+        but NOT updated in the latest (Wednesday) run.
+        
+        Logic:
+        - Find the last Sunday scrape timestamp from logs
+        - Find the last Wednesday scrape timestamp from logs  
+        - Events with last_scraped matching Sunday but NOT Wednesday are considered "deleted"
+        """
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        
+        today = datetime.now()
+        future_date = (today + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+        today_str = today.strftime("%Y-%m-%d")
+        
+        # Get the last two scrape timestamps from logs
+        cursor.execute('''
+            SELECT timestamp FROM scraping_logs 
+            WHERE status IN ('OK', 'Warn')
+            ORDER BY timestamp DESC 
+            LIMIT 2
+        ''')
+        recent_logs = cursor.fetchall()
+        
+        if len(recent_logs) < 2:
+            conn.close()
+            return []  # Not enough scrape history to compare
+        
+        latest_scrape = recent_logs[0][0]  # Most recent (e.g., Wednesday)
+        previous_scrape = recent_logs[1][0]  # Previous (e.g., Sunday)
+        
+        # Events in next N days that have last_scraped from previous run but NOT latest run
+        # This means they existed before but weren't found in the latest scrape
+        cursor.execute('''
+            SELECT * FROM events 
+            WHERE date_iso >= ? AND date_iso <= ?
+            AND DATE(last_scraped) = DATE(?)
+            AND DATE(last_scraped) < DATE(?)
+            ORDER BY event_url, date_iso
+        ''', (today_str, future_date, previous_scrape, latest_scrape))
+        
+        rows = cursor.fetchall()
+        column_names = [description[0] for description in cursor.description]
+        events = [dict(zip(column_names, row)) for row in rows]
+        conn.close()
+        return events
+    
+    def get_last_scrape_info(self):
+        """Get information about the last two scrape runs for comparison."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT timestamp, type, status, events_found 
+            FROM scraping_logs 
+            WHERE status IN ('OK', 'Warn')
+            ORDER BY timestamp DESC 
+            LIMIT 2
+        ''')
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        if not rows:
+            return None, None
+        
+        latest = {
+            'timestamp': rows[0][0],
+            'type': rows[0][1],
+            'status': rows[0][2],
+            'events_found': rows[0][3]
+        } if len(rows) > 0 else None
+        
+        previous = {
+            'timestamp': rows[1][0],
+            'type': rows[1][1],
+            'status': rows[1][2],
+            'events_found': rows[1][3]
+        } if len(rows) > 1 else None
+        
+        return latest, previous
+    
+    # ==================== SCHEDULED SCRAPING & COMPARATOR ====================
+    
+    @staticmethod
+    def generate_unique_key(event_data):
+        """Generate a stable unique key for an event.
+        
+        Uses event_url as base, or creates canonical key from name+date+location.
+        For events with URL fragments (#), strips them to ensure consistency.
+        """
+        import hashlib
+        
+        event_url = event_data.get('event_url', '')
+        event_name = event_data.get('event_name', '')
+        date_iso = event_data.get('date_iso', '')
+        location = event_data.get('location', '')
+        
+        # Strip URL fragments for consistency
+        if '#' in event_url and 'biblioteket.stockholm.se' not in event_url:
+            event_url = event_url.split('#')[0]
+        
+        # Prefer URL as stable identifier if it exists and is meaningful
+        if event_url and event_url != 'N/A' and not event_url.startswith('http://example.com'):
+            # For Stockholm library, include time/location in hash since URL is generic
+            if 'biblioteket.stockholm.se' in event_url:
+                unique_str = f"{event_name}|{date_iso}|{event_data.get('time', '')}|{location}"
+                return hashlib.sha256(unique_str.encode('utf-8')).hexdigest()[:32]
+            else:
+                # Use URL + date as unique key for non-Stockholm sites
+                unique_str = f"{event_url}|{date_iso}"
+                return hashlib.sha256(unique_str.encode('utf-8')).hexdigest()[:32]
+        
+        # Fallback: canonical key from name+date+location
+        unique_str = f"{event_name}|{date_iso}|{location}"
+        return hashlib.sha256(unique_str.encode('utf-8')).hexdigest()[:32]
+    
+    def log_scrape_run(self, run_type, window_days):
+        """Log metadata for a scrape run and return the run ID."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO scrape_runs (run_type, window_days)
+            VALUES (?, ?)
+        ''', (run_type, window_days))
+        
+        run_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return run_id
+    
+    def update_scrape_run_stats(self, run_id, events_scraped, events_marked_deleted):
+        """Update scrape run statistics after comparison."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            UPDATE scrape_runs 
+            SET events_scraped = ?, events_marked_deleted = ?
+            WHERE id = ?
+        ''', (events_scraped, events_marked_deleted, run_id))
+        
+        conn.commit()
+        conn.close()
+    
+    # ==================== SCHEDULER SETTINGS (Two-Scraper System) ====================
+    
+    def get_scheduler_setting(self, key, default=None):
+        """Get a scheduler setting value."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM scheduler_settings WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row and row[0] else default
+    
+    def get_all_scheduler_settings(self):
+        """Get all scheduler settings as a dictionary."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        cursor.execute("SELECT key, value, updated_at FROM scheduler_settings")
+        settings = {row[0]: {"value": row[1], "updated_at": row[2]} for row in cursor.fetchall()}
+        conn.close()
+        return settings
+    
+    def set_scheduler_setting(self, key, value):
+        """Set a scheduler setting value. Returns True if the value changed."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        
+        # Get current value to detect change
+        cursor.execute("SELECT value FROM scheduler_settings WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        old_value = row[0] if row else None
+        
+        # Update the setting
+        cursor.execute('''
+            INSERT INTO scheduler_settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        ''', (key, str(value), datetime.now().isoformat()))
+        
+        conn.commit()
+        conn.close()
+        
+        return old_value != str(value)
+    
+    def set_baseline_start_date(self, date_str):
+        """Set the baseline start date. Returns True if date changed (triggers immediate run)."""
+        return self.set_scheduler_setting("baseline_start_date", date_str)
+    
+    def get_baseline_start_date(self):
+        """Get the configured baseline start date."""
+        return self.get_scheduler_setting("baseline_start_date", "")
+    
+    def update_last_baseline_run(self):
+        """Update the last baseline run timestamp."""
+        self.set_scheduler_setting("last_baseline_run", datetime.now().isoformat())
+    
+    def update_last_incremental_run(self):
+        """Update the last incremental run timestamp."""
+        self.set_scheduler_setting("last_incremental_run", datetime.now().isoformat())
+    
+    # ==================== PENDING CHANGES (Incremental Scraper Staging) ====================
+    
+    def stage_insert(self, event_data, run_id=None):
+        """Stage an event for insertion (found in scrape but not in DB)."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        
+        unique_key = self.generate_unique_key(event_data)
+        
+        # Check if already staged
+        cursor.execute("SELECT id FROM pending_changes WHERE unique_key = ? AND change_type = 'insert'", (unique_key,))
+        if cursor.fetchone():
+            conn.close()
+            return False  # Already staged
+        
+        cursor.execute('''
+            INSERT INTO pending_changes (change_type, event_data, unique_key, event_name, date_iso, location, run_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            'insert',
+            json.dumps(event_data),
+            unique_key,
+            event_data.get('event_name', ''),
+            event_data.get('date_iso', ''),
+            event_data.get('location', ''),
+            run_id
+        ))
+        
+        conn.commit()
+        conn.close()
+        return True
+    
+    def stage_delete(self, event_data, run_id=None):
+        """Stage an event for deletion (found in DB but not in scrape)."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        
+        unique_key = event_data.get('unique_key') or self.generate_unique_key(event_data)
+        
+        # Check if already staged
+        cursor.execute("SELECT id FROM pending_changes WHERE unique_key = ? AND change_type = 'delete'", (unique_key,))
+        if cursor.fetchone():
+            conn.close()
+            return False  # Already staged
+        
+        cursor.execute('''
+            INSERT INTO pending_changes (change_type, event_data, unique_key, event_name, date_iso, location, run_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            'delete',
+            json.dumps(event_data),
+            unique_key,
+            event_data.get('event_name', ''),
+            event_data.get('date_iso', ''),
+            event_data.get('location', ''),
+            run_id
+        ))
+        
+        conn.commit()
+        conn.close()
+        return True
+    
+    def get_pending_changes(self):
+        """Get all pending changes grouped by type."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT id, change_type, event_data, unique_key, event_name, date_iso, location, detected_at, run_id
+            FROM pending_changes
+            ORDER BY change_type, detected_at DESC
+        ''')
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        changes = {"insert": [], "delete": []}
+        for row in rows:
+            change = {
+                "id": row[0],
+                "change_type": row[1],
+                "event_data": json.loads(row[2]) if row[2] else {},
+                "unique_key": row[3],
+                "event_name": row[4],
+                "date_iso": row[5],
+                "location": row[6],
+                "detected_at": row[7],
+                "run_id": row[8]
+            }
+            changes[row[1]].append(change)
+        
+        return changes
+    
+    def get_pending_counts(self):
+        """Get counts of pending inserts and deletes."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT change_type, COUNT(*) FROM pending_changes GROUP BY change_type")
+        counts = {row[0]: row[1] for row in cursor.fetchall()}
+        conn.close()
+        
+        return {
+            "insert": counts.get("insert", 0),
+            "delete": counts.get("delete", 0)
+        }
+    
+    def apply_pending_changes(self):
+        """Apply all pending changes to the main events table.
+        
+        - Inserts: Add new events to events table
+        - Deletes: Hard-delete events from events table
+        
+        Returns dict with counts of applied changes.
+        """
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        
+        # Get all pending changes
+        cursor.execute("SELECT id, change_type, event_data, unique_key FROM pending_changes")
+        changes = cursor.fetchall()
+        
+        inserted = 0
+        deleted = 0
+        
+        for change_id, change_type, event_data_json, unique_key in changes:
+            try:
+                if change_type == 'insert':
+                    # Insert event to main table
+                    event_data = json.loads(event_data_json)
+                    self._insert_event_internal(cursor, event_data)
+                    inserted += 1
+                    
+                elif change_type == 'delete':
+                    # Hard delete from events table
+                    cursor.execute("DELETE FROM events WHERE unique_key = ?", (unique_key,))
+                    if cursor.rowcount > 0:
+                        deleted += 1
+                
+                # Remove from pending_changes
+                cursor.execute("DELETE FROM pending_changes WHERE id = ?", (change_id,))
+                
+            except Exception as e:
+                print(f"[ERROR] Failed to apply change {change_id}: {e}")
+                continue
+        
+        conn.commit()
+        conn.close()
+        
+        return {"inserted": inserted, "deleted": deleted}
+    
+    def _insert_event_internal(self, cursor, event_data):
+        """Internal method to insert event using existing cursor."""
+        unique_key = self.generate_unique_key(event_data)
+        
+        cursor.execute('''
+            INSERT INTO events (
+                event_name, date_iso, event_url, end_date_iso, time, location, 
+                target_group, target_group_normalized, status, booking_info, description, image_url, 
+                unique_key, age_limit, created_at, last_scraped
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(event_name, date_iso, event_url, location) DO UPDATE SET
+                end_date_iso = excluded.end_date_iso,
+                time = excluded.time,
+                target_group = excluded.target_group,
+                target_group_normalized = excluded.target_group_normalized,
+                status = excluded.status,
+                booking_info = excluded.booking_info,
+                description = excluded.description,
+                image_url = excluded.image_url,
+                unique_key = excluded.unique_key,
+                age_limit = excluded.age_limit,
+                last_scraped = CURRENT_TIMESTAMP
+        ''', (
+            event_data.get('event_name'),
+            event_data.get('date_iso'),
+            event_data.get('event_url'),
+            event_data.get('end_date_iso'),
+            event_data.get('time'),
+            event_data.get('location'),
+            event_data.get('target_group'),
+            event_data.get('target_group_normalized'),
+            event_data.get('status'),
+            event_data.get('booking_info'),
+            event_data.get('description'),
+            event_data.get('image_url'),
+            unique_key,
+            event_data.get('age_limit'),
+        ))
+    
+    def discard_pending_changes(self):
+        """Discard all pending changes without applying them."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM pending_changes")
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return deleted
+    
+    def discard_single_change(self, change_id):
+        """Discard a single pending change."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM pending_changes WHERE id = ?", (change_id,))
+        conn.commit()
+        conn.close()
+    
+    # ==================== INCREMENTAL COMPARISON ====================
+    
+    def compare_and_stage_changes(self, scraped_events, start_date, end_date, run_id=None):
+        """Compare scraped events against DB and stage changes.
+        
+        Args:
+            scraped_events: List of event dicts from scraper
+            start_date: Start of date range (YYYY-MM-DD)
+            end_date: End of date range (YYYY-MM-DD)
+            run_id: Optional run identifier
+        
+        Returns:
+            Dict with counts: {"staged_inserts": N, "staged_deletes": N}
+        """
+        from urllib.parse import urlparse
+        
+        # Extract unique domains from scraped events
+        scraped_domains = set()
+        for event in scraped_events:
+            url = event.get('event_url', '')
+            if url:
+                try:
+                    domain = urlparse(url).netloc
+                    scraped_domains.add(domain)
+                except:
+                    pass
+        
+        if not scraped_domains:
+            # No valid domains found, cannot compare
+            return {"staged_inserts": 0, "staged_deletes": 0}
+        
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        
+        # Get existing events in the date range from DB, filtered by scraped domains
+        # Build WHERE clause with domain filters
+        domain_conditions = " OR ".join(["event_url LIKE ?" for _ in scraped_domains])
+        query = f'''
+            SELECT id, event_name, date_iso, event_url, location, unique_key, time
+            FROM events
+            WHERE date_iso >= ? AND date_iso <= ?
+            AND ({domain_conditions})
+        '''
+        
+        # Build parameters: start_date, end_date, then domain patterns
+        params = [start_date, end_date] + [f'%{domain}%' for domain in scraped_domains]
+        
+        cursor.execute(query, params)
+        
+        db_events = {row[5]: {
+            "id": row[0],
+            "event_name": row[1],
+            "date_iso": row[2],
+            "event_url": row[3],
+            "location": row[4],
+            "unique_key": row[5],
+            "time": row[6]  # Include time for proper key comparison
+        } for row in cursor.fetchall() if row[5]}  # Only include events with unique_key
+        
+        conn.close()
+        
+        # Build set of scraped unique keys - ONLY for events within the date range
+        # This prevents events outside the comparison window from being flagged
+        scraped_keys = set()
+        scraped_events_in_range = []
+        for event in scraped_events:
+            event_date = event.get('date_iso', '')
+            # Skip events outside the date range
+            if event_date and (event_date < start_date or event_date > end_date):
+                continue
+            unique_key = self.generate_unique_key(event)
+            event['unique_key'] = unique_key
+            scraped_keys.add(unique_key)
+            scraped_events_in_range.append(event)
+        
+        staged_inserts = 0
+        staged_deletes = 0
+        
+        # Find events to INSERT (in scraped but not in DB) - only within date range
+        for event in scraped_events_in_range:
+            if event['unique_key'] not in db_events:
+                if self.stage_insert(event, run_id):
+                    staged_inserts += 1
+        
+        # Find events to DELETE (in DB but not in scraped)
+        for unique_key, db_event in db_events.items():
+            if unique_key not in scraped_keys:
+                if self.stage_delete(db_event, run_id):
+                    staged_deletes += 1
+        
+        return {"staged_inserts": staged_inserts, "staged_deletes": staged_deletes}
+    
+    def get_events_in_date_range(self, start_date, end_date):
+        """Get all events within a date range."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT * FROM events
+            WHERE date_iso >= ? AND date_iso <= ?
+            ORDER BY date_iso ASC
+        ''', (start_date, end_date))
+        
+        rows = cursor.fetchall()
+        column_names = [description[0] for description in cursor.description]
+        events = [dict(zip(column_names, row)) for row in rows]
+        conn.close()
+        return events

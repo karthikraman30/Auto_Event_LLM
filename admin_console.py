@@ -243,18 +243,22 @@ st.set_page_config(page_title="Event Scraper Admin", layout="wide", page_icon="�
 db = DatabaseManager()
 
 # --- BACKGROUND SCHEDULER ---
-def run_scheduled_scrape():
-    """Run scraping job and log results using subprocess for parallel execution."""
+def run_scheduled_scrape(run_type='baseline'):
+    """Run scraping job and log results using subprocess for parallel execution.
+    
+    Args:
+        run_type: 'baseline' (monthly) or 'incremental' (every 3 days)
+    """
     import subprocess
     import re
     try:
         env = get_subprocess_env()
         result = subprocess.run(
-            [VENV_PYTHON, RUN_PARALLEL_FILE],
+            [VENV_PYTHON, RUN_PARALLEL_FILE, '--run-type', run_type],
             cwd=os.getcwd(),
             capture_output=True,
             text=True,
-            timeout=1800,
+            timeout=2700,
             env=env
         )
         
@@ -270,54 +274,36 @@ def run_scheduled_scrape():
             
             status = "Warn" if failures > 0 else "OK"
             warnings = [line for line in output.split('\n') if 'Error' in line or 'Warning' in line]
-            db.add_log("Auto", status, events_count, failures, warnings if warnings else None)
+            log_type = f"{run_type.capitalize()}"
+            db.add_log(log_type, status, events_count, failures, warnings if warnings else None)
         else:
-            db.add_log("Auto", "Warn", 0, 0, ["Could not parse scraping results"])
+            db.add_log(run_type.capitalize(), "Warn", 0, 0, ["Could not parse scraping results"])
     except subprocess.TimeoutExpired:
-        db.add_log("Auto", "Error", 0, 1, ["Scraping timed out after 30 minutes"])
+        db.add_log(run_type.capitalize(), "Error", 0, 1, ["Scraping timed out after 45 minutes"])
     except Exception as e:
-        db.add_log("Auto", "Error", 0, 1, [str(e)])
+        db.add_log(run_type.capitalize(), "Error", 0, 1, [str(e)])
 
 def setup_scheduler():
-    """Initialize scheduler based on settings."""
-    settings = db.get_all_settings()
-    freq = settings.get("schedule_frequency", "weekly")
-    
+    """Initialize scheduler with two jobs: Monthly baseline and Every-3-days incremental."""
     scheduler = BackgroundScheduler()
     
-    if freq == "custom":
-        # Custom scheduling - convert to daily cron trigger at specific time
-        custom_datetime_str = settings.get("schedule_datetime")
-        if custom_datetime_str:
-            try:
-                custom_datetime = datetime.fromisoformat(custom_datetime_str)
-                # Extract hour and minute from custom datetime
-                hour = custom_datetime.hour
-                minute = custom_datetime.minute
-                # Use CronTrigger to run every day at the specified time (more reliable)
-                scheduler.add_job(run_scheduled_scrape, CronTrigger(hour=hour, minute=minute))
-                print(f"Scheduled custom scrape for every day at {hour:02d}:{minute:02d}")
-            except Exception as e:
-                print(f"Error parsing custom datetime: {e}")
-                # Fallback to weekly if custom datetime is invalid
-                freq = "weekly"
+    # 1st of every month at 06:00: Baseline scraper (current month + 5 days into next)
+    scheduler.add_job(
+        lambda: run_scheduled_scrape(run_type='baseline'), 
+        CronTrigger(day=1, hour=6, minute=0)
+    )
+    print("✓ Scheduled Monthly Baseline scraper (1st of month at 06:00)")
     
-    if freq != "custom":
-        # Weekly or Daily scheduling
-        day = settings.get("schedule_day", "monday")
-        time_str = settings.get("schedule_time", "06:00")
-        hour, minute = map(int, time_str.split(":"))
-        
-        if freq == "daily":
-            scheduler.add_job(run_scheduled_scrape, CronTrigger(hour=hour, minute=minute))
-        else:  # weekly
-            day_map = {"monday": "mon", "tuesday": "tue", "wednesday": "wed", "thursday": "thu",
-                       "friday": "fri", "saturday": "sat", "sunday": "sun"}
-            scheduler.add_job(run_scheduled_scrape, CronTrigger(day_of_week=day_map.get(day, "mon"), 
-                                                                hour=hour, minute=minute))
+    # Every 3 days at 06:00: Incremental scraper (next 5-6 days)
+    scheduler.add_job(
+        lambda: run_scheduled_scrape(run_type='incremental'),
+        CronTrigger(day='*/3', hour=6, minute=0)
+    )
+    print("✓ Scheduled Incremental scraper (every 3 days at 06:00)")
+    
     scheduler.start()
     return scheduler
-
+    
 @st.cache_resource
 def install_playwright_browsers():
     """
@@ -346,7 +332,7 @@ if 'scheduler' not in st.session_state:
 st.title("🎭 Event Scraper Admin Console")
 
 # --- TABS ---
-tabs = st.tabs(["📊 Dashboard", "⚙️ Settings", "📝 Logs", "📈 Analytics", "🎯 Selectors"])
+tabs = st.tabs(["📊 Dashboard", "⚙️ Settings", "📝 Logs", "🎯 Selectors", "🔄 Updates"])
 
 # =============================================================================
 # TAB 1: DASHBOARD
@@ -397,10 +383,50 @@ with tabs[0]:
     col5.metric("Last Sync", last_sync_display)
     col6.metric("Next Sync", next_sync_display)
     
+    # --- SCRAPE FAILURES NOTIFICATION ---
+    active_failures = db.get_active_failures()
+    if active_failures:
+        st.markdown("---")
+        st.error(f"⚠️ **{len(active_failures)} URL(s) failed during scraping**")
+        with st.expander("🔴 View Failure Details", expanded=True):
+            for failure in active_failures:
+                # Format the timestamp
+                try:
+                    occurred_dt = datetime.strptime(failure['occurred_at'], "%Y-%m-%d %H:%M:%S")
+                    time_ago = datetime.now() - occurred_dt
+                    if time_ago.days > 0:
+                        time_display = f"{time_ago.days} days ago"
+                    elif time_ago.seconds // 3600 > 0:
+                        time_display = f"{time_ago.seconds // 3600} hours ago"
+                    else:
+                        time_display = f"{time_ago.seconds // 60} minutes ago"
+                except:
+                    time_display = failure['occurred_at']
+                
+                # Display failure details
+                error_type_emoji = {
+                    'HTTP_403': '🚫',
+                    'HTTP_404': '❓',
+                    'HTTP_SERVER_ERROR': '💥',
+                    'TIMEOUT': '⏱️',
+                    'CONNECTION_ERROR': '🔌',
+                    'UNKNOWN': '❌'
+                }.get(failure.get('error_type', 'UNKNOWN'), '❌')
+                
+                st.markdown(f"""
+                **{error_type_emoji} {failure['url_name'] or 'Unknown Site'}**  
+                📍 `{failure['url']}`  
+                ⚠️ {failure['error_message'][:200]}{'...' if len(failure['error_message']) > 200 else ''}  
+                🕐 Failed: {time_display} | Type: `{failure.get('error_type', 'UNKNOWN')}`
+                """)
+                st.markdown("---")
+            
+            st.caption("💡 These failures will be automatically cleared when the URLs are successfully scraped again.")
+    
     # --- ACTIONS SECTION ---
     st.markdown("---")
     st.subheader("🎬 ACTIONS")
-    action_col1, action_col2, action_col3 = st.columns([1, 1, 1])
+    action_col1, action_col2, action_col3, action_col4 = st.columns([1, 0.5, 1, 1])
     
     if 'log_buffer' not in st.session_state:
         st.session_state.log_buffer = ""
@@ -409,92 +435,105 @@ with tabs[0]:
         st.session_state.confirm_clear_events = False
     
     with action_col1:
-        if st.button("🚀 Scrape Now", use_container_width=True):
-            st.session_state.log_buffer = "Starting parallel scrape...\n"
-            with st.spinner("Scraping all venues... check the Logs tab for progress."):
-                try:
-                    import subprocess
-                    import sys
-                    
-                    env = get_subprocess_env()
-                    
-                    # Use subprocess.run instead of Popen for better error handling
-                    result = subprocess.run(
-                        [VENV_PYTHON, RUN_PARALLEL_FILE],
-                        cwd=os.getcwd(),
-                        capture_output=True,
-                        text=True,
-                        timeout=1800,  # 30 minutes timeout
-                        env=env
-                    )
-                    
-                    # Store output for parsing
-                    st.session_state.log_buffer = result.stdout
-                    if result.stderr:
-                        st.session_state.log_buffer += "\n--- STDERR ---\n" + result.stderr
-                    
-                    if result.returncode == 0:
-                        # Parse results from log buffer
-                        match = re.search(r'Scraping complete: (\d+) events, (\d+) failures', result.stdout)
-                        if match:
-                            events_count = int(match.group(1))
-                            failures = int(match.group(2))
-                            status = "Warn" if failures > 0 else "OK"
-                            db.add_log("Manual", status, events_count, failures, None)
-                        st.success("✅ Scrape completed successfully!")
-                        # Reset clear events confirmation after successful scrape
-                        st.session_state.confirm_clear_events = False
-                        st.rerun()  # Refresh to show new counts in metrics
-                    else:
-                        error_msg = f"Return code: {result.returncode}\nSTDERR: {result.stderr}"
-                        db.add_log("Manual", "Error", 0, 1, [error_msg])
-                        st.error(f"❌ Scraping failed. Return code: {result.returncode}")
-                        st.text_area("Error Details", result.stderr, height=200)
-                        
-                except subprocess.TimeoutExpired:
-                    error_msg = "Scraping timed out after 30 minutes"
-                    db.add_log("Manual", "Error", 0, 1, [error_msg])
-                    st.error("❌ " + error_msg)
-                except Exception as e:
-                    error_msg = f"Subprocess failed: {str(e)}"
-                    st.warning("⚠️ Subprocess method failed, trying direct import...")
-                    st.write(f"Error: {e}")
-                    
-                    # Try fallback method
-                    try:
-                        st.write("Attempting direct scraping...")
-                        result = scrape_directly()
-                        
-                        if result["events"] > 0:
-                            status = "Warn" if result["failures"] > 0 else "OK"
-                            db.add_log("Manual", status, result["events"], result["failures"], result.get("warnings"))
-                            st.success(f"✅ Direct scrape completed! {result['events']} events found.")
-                            if result["failures"] > 0:
-                                st.warning(f"⚠️ {result['failures']} failures occurred")
-                            st.rerun()
-                        else:
-                            db.add_log("Manual", "Error", 0, 1, result.get("warnings", ["Direct scraping failed"]))
-                            st.error("❌ Direct scraping also failed")
-                            
-                    except Exception as fallback_error:
-                        final_error = f"Both methods failed. Subprocess: {str(e)}, Direct: {str(fallback_error)}"
-                        db.add_log("Manual", "Error", 0, 1, [final_error])
-                        st.error("❌ Both scraping methods failed")
-                        st.text_area("Final Error", final_error, height=200)
+        scrape_btn = st.button("🚀 Scrape Now", use_container_width=True)
     
     with action_col2:
+        scrape_days = st.number_input("Days", min_value=1, max_value=90, value=30, help="Number of days to scrape", label_visibility="collapsed")
+    
+    if scrape_btn:
+        st.session_state.log_buffer = f"Starting parallel scrape for {scrape_days} days...\n"
+        with st.spinner("Scraping all venues... check the Logs tab for progress."):
+            try:
+                import subprocess
+                import sys
+                
+                env = get_subprocess_env()
+                
+                # Use subprocess.run with --days argument
+                result = subprocess.run(
+                    [VENV_PYTHON, RUN_PARALLEL_FILE, "--days", str(scrape_days)],
+                    cwd=os.getcwd(),
+                    capture_output=True,
+                    text=True,
+                    timeout=2700,  # 45 minutes timeout
+                    env=env
+                )
+                
+                # Store output for parsing
+                st.session_state.log_buffer = result.stdout
+                if result.stderr:
+                    st.session_state.log_buffer += "\n--- STDERR ---\n" + result.stderr
+                
+                if result.returncode == 0:
+                    # Parse results from log buffer
+                    match = re.search(r'Scraping complete: (\d+) events, (\d+) failures', result.stdout)
+                    if match:
+                        events_count = int(match.group(1))
+                        failures = int(match.group(2))
+                        status = "Warn" if failures > 0 else "OK"
+                        db.add_log("Manual", status, events_count, failures, None)
+                    st.success("✅ Scrape completed successfully!")
+                    # Reset clear events confirmation after successful scrape
+                    st.session_state.confirm_clear_events = False
+                    st.rerun()  # Refresh to show new counts in metrics
+                else:
+                    error_msg = f"Return code: {result.returncode}\nSTDERR: {result.stderr}"
+                    db.add_log("Manual", "Error", 0, 1, [error_msg])
+                    st.error(f"❌ Scraping failed. Return code: {result.returncode}")
+                    st.text_area("Error Details", result.stderr, height=200)
+                    
+            except subprocess.TimeoutExpired:
+                error_msg = "Scraping timed out after 45 minutes"
+                db.add_log("Manual", "Error", 0, 1, [error_msg])
+                st.error("❌ " + error_msg)
+            except Exception as e:
+                error_msg = f"Subprocess failed: {str(e)}"
+                st.warning("⚠️ Subprocess method failed, trying direct import...")
+                st.write(f"Error: {e}")
+                
+                # Try fallback method
+                try:
+                    st.write("Attempting direct scraping...")
+                    result = scrape_directly()
+                    
+                    if result["events"] > 0:
+                        status = "Warn" if result["failures"] > 0 else "OK"
+                        db.add_log("Manual", status, result["events"], result["failures"], result.get("warnings"))
+                        st.success(f"✅ Direct scrape completed! {result['events']} events found.")
+                        if result["failures"] > 0:
+                            st.warning(f"⚠️ {result['failures']} failures occurred")
+                        st.rerun()
+                    else:
+                        db.add_log("Manual", "Error", 0, 1, result.get("warnings", ["Direct scraping failed"]))
+                        st.error("❌ Direct scraping also failed")
+                        
+                except Exception as fallback_error:
+                    final_error = f"Both methods failed. Subprocess: {str(e)}, Direct: {str(fallback_error)}"
+                    db.add_log("Manual", "Error", 0, 1, [final_error])
+                    st.error("❌ Both scraping methods failed")
+                    st.text_area("Final Error", final_error, height=200)
+    
+    with action_col3:
         events = db.get_all_events()
         if events:
             df_export = pd.DataFrame(events)
+            
+            # Use target_group_normalized values in the target_group column
+            if 'target_group_normalized' in df_export.columns:
+                df_export['target_group'] = df_export['target_group_normalized'].fillna('all_ages')
+            
             # Exclude internal database columns from export
-            columns_to_exclude = ['id', 'last_scraped']
+            columns_to_exclude = [
+                'id', 'target_group_normalized', 'deletion_status', 'deleted_at', 
+                'deleted_by_run_type', 'deleted_window_days', 'missing_count'
+            ]
             df_export = df_export.drop(columns=[col for col in columns_to_exclude if col in df_export.columns])
             csv = df_export.to_csv(index=False).encode('utf-8')
             st.download_button("📁 Export Excel", csv, "events.csv", "text/csv", use_container_width=True)
         else:
             st.button("📁 Export Excel", disabled=True, use_container_width=True)
     
-    with action_col3:
+    with action_col4:
         if st.button("🗑️ Clear Events", use_container_width=True):
             # Show confirmation dialog
             if st.session_state.get('confirm_clear_events', False):
@@ -593,8 +632,8 @@ with tabs[0]:
     # Convert grouped events back to list for display
     events_display = list(grouped_events.values())
     
-    # Count cancelled events in current view
-    cancelled_count = sum(1 for e in events_display if e.get('status', 'scheduled').lower() == 'cancelled')
+    # Count cancelled events in current view (handle None status values)
+    cancelled_count = sum(1 for e in events_display if (e.get('status') or 'scheduled').lower() == 'cancelled')
     
     # Display events section header with cancelled count
     events_header = "📋 EVENTS"
@@ -653,7 +692,7 @@ with tabs[0]:
                 
             booking_display = event['booking_info'] or "Booking TBA"
             event_url = event['urls'][0] if event['urls'] else '#'  # Use first URL
-            event_status = event.get('status', 'scheduled').lower()
+            event_status = (event.get('status') or 'scheduled').lower()
             is_cancelled = event_status == 'cancelled'
             
             # Create card container with special styling for cancelled events
@@ -745,127 +784,231 @@ with tabs[0]:
 with tabs[1]:
     settings = db.get_all_settings()
     
-    # --- SCRAPING SCHEDULE ---
+    # --- TWO-SCRAPER SYSTEM ---
     st.markdown("---")
     st.subheader("⏰ SCRAPING SCHEDULE")
+    st.markdown("The system uses two scrapers to maintain accurate event data:")
     
-    freq_options = ["weekly", "daily", "custom"]
-    current_freq = settings.get("schedule_frequency", "weekly")
-    frequency = st.radio("Frequency", freq_options, index=freq_options.index(current_freq), horizontal=True)
+    # --- 1️⃣ MONTHLY BASELINE SCRAPER ---
+    st.markdown("---")
+    st.markdown("### 1️⃣ Monthly Baseline Scraper")
+    st.info("""
+    **Purpose:** Source of truth for the database.
     
-    # Show different options based on frequency
-    if frequency == "custom":
-        st.info("📅 Set a specific date and time for the next scheduled scrape")
-        
-        custom_col1, custom_col2 = st.columns(2)
-        with custom_col1:
-            custom_date = st.date_input("Select Date", value=datetime.now().date(), key="schedule_custom_date")
-        with custom_col2:
-            # Use text input for manual time entry in HH:MM format
-            current_time_str = settings.get("schedule_time", "06:00")
-            custom_time_str = st.text_input("Enter Time (HH:MM)", value=current_time_str, placeholder="e.g. 14:30")
-            
-            # Parse the time string
-            try:
-                time_parts = custom_time_str.split(":")
-                custom_time = datetime.strptime(custom_time_str, "%H:%M").time()
-            except:
-                st.warning("⚠️ Invalid time format. Use HH:MM (e.g., 14:30)")
-                custom_time = datetime.now().time()
-        
-        # Combine date and time
-        custom_datetime = datetime.combine(custom_date, custom_time)
-        st.caption(f"**Scheduled run:** {custom_datetime.strftime('%A, %b %d, %Y at %H:%M')}")
-        
-        schedule_day = None  # Not used for custom
-        schedule_time = None  # Not used for custom
-        
-    elif frequency == "daily":
-        st.info("⏰ Scraping will run every day at the specified time")
-        
-        # Only show time picker for daily
-        current_time_str = settings.get("schedule_time", "06:00")
+    - Runs on the **1st day of every month** at 06:00
+    - Scrapes: **Current month + 5 days into next month**
+    - **Direct insert** to database (no review needed)
+    """)
+    
+    # Get current baseline settings
+    scheduler_settings = db.get_all_scheduler_settings()
+    current_baseline_date = db.get_baseline_start_date()
+    last_baseline_run = scheduler_settings.get("last_baseline_run", {}).get("value", "Never")
+    
+    # Display last run time
+    if last_baseline_run and last_baseline_run != "Never":
         try:
-            current_time_obj = datetime.strptime(current_time_str, "%H:%M").time()
+            last_dt = datetime.fromisoformat(last_baseline_run)
+            last_baseline_display = last_dt.strftime("%b %d, %Y at %H:%M")
         except:
-            current_time_obj = datetime.strptime("06:00", "%H:%M").time()
-        
-        schedule_time_input = st.time_input("Select Time", value=current_time_obj)
-        schedule_time = f"{schedule_time_input.hour:02d}:{schedule_time_input.minute:02d}"
-        
-        # Display next scheduled run
-        today = datetime.now()
-        next_run = today.replace(hour=schedule_time_input.hour, minute=schedule_time_input.minute, second=0)
-        if next_run <= today:
-            next_run += timedelta(days=1)
-        st.caption(f"**Next scheduled run:** {next_run.strftime('%A, %b %d, %Y at %H:%M')}")
-        
-        schedule_day = None  # Not used for daily
-        custom_datetime = None
-        
-    else:  # weekly
-        st.info("📆 Scraping will run on the selected day and time each week")
-        
-        sched_col1, sched_col2 = st.columns(2)
-        
-        days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-        current_day = settings.get("schedule_day", "monday")
-        with sched_col1:
-            schedule_day = st.selectbox("Day", days, index=days.index(current_day))
-        
-        current_time_str = settings.get("schedule_time", "06:00")
-        try:
-            current_time_obj = datetime.strptime(current_time_str, "%H:%M").time()
-        except:
-            current_time_obj = datetime.strptime("06:00", "%H:%M").time()
-        
-        with sched_col2:
-            schedule_time_input = st.time_input("Select Time", value=current_time_obj)
-            schedule_time = f"{schedule_time_input.hour:02d}:{schedule_time_input.minute:02d}"
-        
-        # Calculate next scheduled run
-        today = datetime.now()
-        day_num = days.index(schedule_day)
-        days_ahead = day_num - today.weekday()
-        if days_ahead <= 0:
-            days_ahead += 7
-        next_run_date = today + timedelta(days=days_ahead)
-        next_run = next_run_date.replace(hour=schedule_time_input.hour, minute=schedule_time_input.minute, second=0)
-        st.caption(f"**Next scheduled run:** {next_run.strftime('%A, %b %d, %Y at %H:%M')}")
-        
-        custom_datetime = None
+            last_baseline_display = last_baseline_run
+    else:
+        last_baseline_display = "Never"
     
-    if st.button("💾 Save Schedule"):
-        if frequency == "custom":
-            # Validate custom datetime is in the future
-            now = datetime.now()
-            if custom_datetime <= now:
-                st.error(f"❌ Error: Scheduled time must be in the future! Current time is {now.strftime('%Y-%m-%d %H:%M')}. Please select a time after this.")
-            else:
-                # Save custom datetime
-                db.save_settings({
-                    "schedule_frequency": frequency,
-                    "schedule_datetime": custom_datetime.isoformat()
-                })
-                st.success(f"Schedule saved! Scraping will run at {custom_datetime.strftime('%A, %b %d, %Y at %H:%M')}")
-                
-                # Restart scheduler
-                if st.session_state.scheduler:
-                    st.session_state.scheduler.shutdown(wait=False)
-                st.session_state.scheduler = setup_scheduler()
+    st.caption(f"**Last baseline run:** {last_baseline_display}")
+    
+    # Calculate next scheduled run (1st of next month)
+    today = datetime.now()
+    if today.day == 1 and today.hour < 6:
+        next_baseline = today.replace(hour=6, minute=0, second=0)
+    else:
+        if today.month == 12:
+            next_baseline = datetime(today.year + 1, 1, 1, 6, 0, 0)
         else:
-            # Save weekly/daily schedule
-            db.save_settings({
-                "schedule_frequency": frequency,
-                "schedule_day": schedule_day,
-                "schedule_time": schedule_time
-            })
-            st.success("Schedule saved!")
+            next_baseline = datetime(today.year, today.month + 1, 1, 6, 0, 0)
+    st.caption(f"**Next scheduled run:** {next_baseline.strftime('%A, %b %d, %Y at %H:%M')}")
+    
+    # Custom baseline start date picker
+    st.markdown("**Custom Start Date** (optional)")
+    st.caption("Set a custom date to trigger an immediate baseline run. Leave empty for scheduled runs only.")
+    
+    baseline_col1, baseline_col2 = st.columns([2, 1])
+    
+    with baseline_col1:
+        # Parse current baseline date or use None
+        if current_baseline_date:
+            try:
+                default_date = datetime.strptime(current_baseline_date, "%Y-%m-%d").date()
+            except:
+                default_date = None
+        else:
+            default_date = None
+        
+        new_baseline_date = st.date_input(
+            "Baseline Start Date",
+            value=default_date,
+            help="Select a date to trigger baseline scraper. Past dates will show a warning.",
+            key="baseline_date_input"
+        )
+    
+    with baseline_col2:
+        if st.button("🚀 Run Baseline Now", use_container_width=True):
+            with st.spinner("Running Monthly Baseline scraper..."):
+                try:
+                    env = get_subprocess_env()
+                    # Build command with optional custom start date
+                    cmd = [VENV_PYTHON, RUN_PARALLEL_FILE, "--run-type", "baseline"]
+                    if current_baseline_date:
+                        cmd.extend(["--start-date", current_baseline_date])
+                    result = subprocess.run(
+                        cmd,
+                        cwd=os.getcwd(),
+                        capture_output=True,
+                        text=True,
+                        timeout=2700,
+                        env=env
+                    )
+                    
+                    if result.returncode == 0:
+                        match = re.search(r'Scraping complete: (\d+) events, (\d+) failures', result.stdout)
+                        if match:
+                            events_count = int(match.group(1))
+                            failures = int(match.group(2))
+                            status = "Warn" if failures > 0 else "OK"
+                            db.add_log("Baseline", status, events_count, failures, None)
+                        st.success(f"✅ Baseline scrape completed! Events directly added to database.")
+                        st.rerun()
+                    else:
+                        db.add_log("Baseline", "Error", 0, 1, [result.stderr[:500] if result.stderr else "Unknown error"])
+                        st.error(f"❌ Baseline scrape failed")
+                        st.text_area("Error", result.stderr, height=150)
+                except subprocess.TimeoutExpired:
+                    db.add_log("Baseline", "Error", 0, 1, ["Timeout after 30 minutes"])
+                    st.error("❌ Baseline scrape timed out after 45 minutes")
+                except Exception as e:
+                    db.add_log("Baseline", "Error", 0, 1, [str(e)])
+                    st.error(f"❌ Baseline scrape failed: {str(e)}")
+    
+    # Handle date change with warning for past dates
+    if new_baseline_date:
+        new_date_str = new_baseline_date.strftime("%Y-%m-%d")
+        
+        # Check if past date
+        if new_baseline_date < datetime.now().date():
+            st.warning("⚠️ **Past date selected** - Baseline will run for the historical period starting from this date.")
+        
+        # Check if date changed
+        if new_date_str != current_baseline_date:
+            st.info(f"📅 Date changed from `{current_baseline_date or 'None'}` to `{new_date_str}`")
             
-            # Restart scheduler
-            if st.session_state.scheduler:
-                st.session_state.scheduler.shutdown(wait=False)
-            st.session_state.scheduler = setup_scheduler()
+            if st.button("🔄 Apply & Run Baseline Immediately", type="primary"):
+                # Save the new date
+                date_changed = db.set_baseline_start_date(new_date_str)
+                
+                if date_changed:
+                    st.warning("⚡ Triggering immediate baseline run due to date change...")
+                    # Trigger baseline run with the NEW custom date
+                    with st.spinner("Running baseline scraper..."):
+                        try:
+                            env = get_subprocess_env()
+                            # Pass the custom start date to run_parallel.py
+                            cmd = [VENV_PYTHON, RUN_PARALLEL_FILE, "--run-type", "baseline", "--start-date", new_date_str]
+                            result = subprocess.run(
+                                cmd,
+                                cwd=os.getcwd(),
+                                capture_output=True,
+                                text=True,
+                                timeout=2700,
+                                env=env
+                            )
+                            
+                            if result.returncode == 0:
+                                st.success("✅ Baseline scrape triggered successfully!")
+                                st.rerun()
+                            else:
+                                st.error(f"❌ Baseline scrape failed: {result.stderr[:200] if result.stderr else 'Unknown error'}")
+                        except Exception as e:
+                            st.error(f"❌ Failed to run baseline: {str(e)}")
+    
+    # --- 2️⃣ INCREMENTAL SCRAPER ---
+    st.markdown("---")
+    st.markdown("### 2️⃣ Incremental Scraper (Every 3 Days)")
+    st.info("""
+    **Purpose:** Detect changes (new events, deleted events) between baseline runs.
+    
+    - Runs **every 3 days** at 06:00
+    - Scrapes: **Next 5-6 days** from execution date
+    - **Stages changes for review** (see Updates tab)
+    - Compares against DB using unique event key
+    """)
+    
+    # Get last incremental run
+    last_incremental_run = scheduler_settings.get("last_incremental_run", {}).get("value", "Never")
+    if last_incremental_run and last_incremental_run != "Never":
+        try:
+            last_dt = datetime.fromisoformat(last_incremental_run)
+            last_incremental_display = last_dt.strftime("%b %d, %Y at %H:%M")
+        except:
+            last_incremental_display = last_incremental_run
+    else:
+        last_incremental_display = "Never"
+    
+    st.caption(f"**Last incremental run:** {last_incremental_display}")
+    
+    # Calculate next incremental run (every 3 days)
+    st.caption(f"**Schedule:** Every 3 days at 06:00")
+    
+    # Get pending changes count for display
+    pending_counts = db.get_pending_counts()
+    if pending_counts["insert"] > 0 or pending_counts["delete"] > 0:
+        st.warning(f"⚠️ **Pending changes:** {pending_counts['insert']} inserts, {pending_counts['delete']} deletes → Go to **Updates** tab to review")
+    
+    incremental_col1, incremental_col2 = st.columns([2, 1])
+    
+    with incremental_col2:
+        if st.button("🔄 Run Incremental Now", use_container_width=True):
+            with st.spinner("Running Incremental scraper (next 5-6 days)..."):
+                try:
+                    env = get_subprocess_env()
+                    result = subprocess.run(
+                        [VENV_PYTHON, RUN_PARALLEL_FILE, "--run-type", "incremental"],
+                        cwd=os.getcwd(),
+                        capture_output=True,
+                        text=True,
+                        timeout=2700,
+                        env=env
+                    )
+                    
+                    if result.returncode == 0:
+                        # Parse staged changes from output
+                        match_staged = re.search(r'Staged (\d+) inserts, (\d+) deletes', result.stdout)
+                        if match_staged:
+                            staged_ins = int(match_staged.group(1))
+                            staged_del = int(match_staged.group(2))
+                            st.success(f"✅ Incremental scrape completed!")
+                            st.info(f"📋 Staged **{staged_ins}** inserts, **{staged_del}** deletes for review")
+                            if staged_ins > 0 or staged_del > 0:
+                                st.warning("👉 Go to the **Updates** tab to review and apply changes")
+                        else:
+                            st.success("✅ Incremental scrape completed! Check Updates tab for changes.")
+                        
+                        match = re.search(r'Scraping complete: (\d+) events, (\d+) failures', result.stdout)
+                        if match:
+                            events_count = int(match.group(1))
+                            failures = int(match.group(2))
+                            status = "Warn" if failures > 0 else "OK"
+                            db.add_log("Incremental", status, events_count, failures, None)
+                        st.rerun()
+                    else:
+                        db.add_log("Incremental", "Error", 0, 1, [result.stderr[:500] if result.stderr else "Unknown error"])
+                        st.error(f"❌ Incremental scrape failed")
+                        st.text_area("Error", result.stderr, height=150)
+                except subprocess.TimeoutExpired:
+                    db.add_log("Incremental", "Error", 0, 1, ["Timeout after 30 minutes"])
+                    st.error("❌ Incremental scrape timed out after 45 minutes")
+                except Exception as e:
+                    db.add_log("Incremental", "Error", 0, 1, [str(e)])
+                    st.error(f"❌ Incremental scrape failed: {str(e)}")
     
     # --- ACTIVE VENUES ---
     st.markdown("---")
@@ -924,62 +1067,7 @@ with tabs[1]:
                 st.rerun()
     else:
         st.info("No venues configured. Add one above!")
-    
-    # --- EVENT FILTERING ---
-    st.markdown("---")
-    st.subheader("🗓️ EVENT FILTERING")
-    
-    date_range_options = ["30", "45", "60", "90"]
-    current_range = settings.get("date_range_days", "45")
-    date_range_days = st.selectbox("Date Range (days from today)", date_range_options, 
-                                    index=date_range_options.index(current_range) if current_range in date_range_options else 1)
-    
-    auto_delete = st.checkbox("Auto-delete old events", value=settings.get("auto_delete_enabled", "false") == "true")
-    
-    delete_options = ["30", "60", "90", "180"]
-    current_delete = settings.get("auto_delete_days", "90")
-    delete_days = st.selectbox("Delete events older than (days)", delete_options,
-                               index=delete_options.index(current_delete) if current_delete in delete_options else 2,
-                               disabled=not auto_delete)
-    
-    if st.button("💾 Save Filtering Settings"):
-        db.save_settings({
-            "date_range_days": date_range_days,
-            "auto_delete_enabled": str(auto_delete).lower(),
-            "auto_delete_days": delete_days
-        })
-        st.success("Filtering settings saved!")
-    
-    # --- NOTIFICATIONS ---
-    st.markdown("---")
-    st.subheader("📧 NOTIFICATIONS")
-    
-    email_enabled = st.checkbox("Email notifications", value=settings.get("email_enabled", "false") == "true")
-    email_address = st.text_input("Email", value=settings.get("email_address", ""), 
-                                   placeholder="admin@example.com", disabled=not email_enabled)
-    
-    st.write("Send email on:")
-    notify_complete = st.checkbox("Scraping completed", value=settings.get("notify_on_complete", "true") == "true", 
-                                   disabled=not email_enabled)
-    notify_failure = st.checkbox("Scraping failed", value=settings.get("notify_on_failure", "true") == "true",
-                                  disabled=not email_enabled)
-    notify_summary = st.checkbox("Weekly summary", value=settings.get("notify_weekly_summary", "false") == "true",
-                                  disabled=not email_enabled)
-    
-    notif_col1, notif_col2 = st.columns(2)
-    with notif_col1:
-        if st.button("📧 Test Email", disabled=not email_enabled):
-            st.info("Email testing not yet implemented")
-    with notif_col2:
-        if st.button("💾 Save Notifications"):
-            db.save_settings({
-                "email_enabled": str(email_enabled).lower(),
-                "email_address": email_address,
-                "notify_on_complete": str(notify_complete).lower(),
-                "notify_on_failure": str(notify_failure).lower(),
-                "notify_weekly_summary": str(notify_summary).lower()
-            })
-            st.success("Notification settings saved!")
+
 
 # =============================================================================
 # TAB 3: LOGS
@@ -1062,61 +1150,9 @@ with tabs[2]:
             st.rerun()
 
 # =============================================================================
-# TAB 4: ANALYTICS
+# TAB 4: SELECTORS
 # =============================================================================
 with tabs[3]:
-    # --- EVENTS BY VENUE ---
-    st.markdown("---")
-    st.subheader("🏛️ EVENTS BY VENUE")
-    
-    venue_data = db.get_events_by_venue()
-    if venue_data:
-        venue_df = pd.DataFrame(venue_data)
-        st.bar_chart(venue_df.set_index("venue")["count"])
-        
-        # Also show as text
-        for item in venue_data:
-            bar_length = int((item["count"] / max(v["count"] for v in venue_data)) * 20)
-            bar = "█" * bar_length
-            st.caption(f"{item['venue']}: {bar} {item['count']} events")
-    else:
-        st.info("No venue data available.")
-    
-    # --- EVENTS BY TARGET GROUP ---
-    st.markdown("---")
-    st.subheader("👥 EVENTS BY TARGET GROUP")
-    
-    target_data = db.get_events_by_target_group()
-    if target_data:
-        total = sum(target_data.values())
-        
-        # Display as 3 columns with emoji
-        emoji_map = {"children": "👶", "adults": "🧑", "families": "👨‍👩‍👧", "teens": "🧒", "all_ages": "👥"}
-        
-        target_cols = st.columns(min(len(target_data), 4))
-        for i, (group, count) in enumerate(target_data.items()):
-            percentage = (count / total * 100) if total > 0 else 0
-            emoji = emoji_map.get(group, "👥")
-            with target_cols[i % len(target_cols)]:
-                st.metric(f"{emoji} {group.capitalize()}", f"{percentage:.0f}%")
-    else:
-        st.info("No target group data available.")
-    
-    # --- EVENTS TIMELINE ---
-    st.markdown("---")
-    st.subheader("📈 EVENTS TIMELINE")
-    
-    timeline_data = db.get_events_timeline(weeks=4)
-    if timeline_data and any(item["count"] > 0 for item in timeline_data):
-        timeline_df = pd.DataFrame(timeline_data)
-        st.area_chart(timeline_df.set_index("week")["count"])
-    else:
-        st.info("No timeline data available.")
-
-# =============================================================================
-# TAB 5: SELECTORS
-# =============================================================================
-with tabs[4]:
     st.markdown("---")
     st.subheader("🎯 SELECTOR MANAGEMENT")
     st.markdown("Manage CSS selectors for event extraction without running the spider.")
@@ -1322,7 +1358,8 @@ with tabs[4]:
                 "description": "Description",
                 "booking_info": "Booking Info",
                 "target_group": "Target Group",
-                "status": "Status"
+                "status": "Status",
+                "image_url": "Image URL (img selector)"
             }
             
             new_items = {}
@@ -1353,3 +1390,198 @@ with tabs[4]:
                         st.rerun()
                     except Exception as e:
                         st.error(f"Error adding selector: {str(e)}")
+
+# =============================================================================
+# TAB 5: UPDATES (Pending Changes from Incremental Scraper)
+# =============================================================================
+with tabs[4]:
+    st.markdown("---")
+    st.subheader("🔄 PENDING CHANGES")
+    st.markdown("Review and apply changes detected by the **Incremental Scraper**.")
+    
+    # Get pending changes from staging table
+    pending_changes = db.get_pending_changes()
+    pending_inserts = pending_changes.get("insert", [])
+    pending_deletes = pending_changes.get("delete", [])
+    
+    total_pending = len(pending_inserts) + len(pending_deletes)
+    
+    if total_pending == 0:
+        st.info("✨ No pending changes. Run the **Incremental Scraper** from the Settings tab to detect changes.")
+    else:
+        # Summary metrics
+        summary_col1, summary_col2, summary_col3 = st.columns(3)
+        with summary_col1:
+            st.metric("🆕 Events to Add", len(pending_inserts))
+        with summary_col2:
+            st.metric("🗑️ Events to Delete", len(pending_deletes))
+        with summary_col3:
+            st.metric("📊 Total Pending", total_pending)
+        
+        # Apply/Discard buttons
+        st.markdown("---")
+        action_col1, action_col2, action_col3 = st.columns([1, 1, 2])
+        
+        with action_col1:
+            if st.button("✅ Apply All Changes", type="primary", use_container_width=True):
+                if len(pending_deletes) > 0:
+                    # Show confirmation for deletes
+                    st.session_state.confirm_apply_changes = True
+                else:
+                    # No deletes, apply directly
+                    result = db.apply_pending_changes()
+                    st.success(f"✅ Applied changes: {result['inserted']} inserted, {result['deleted']} deleted")
+                    st.rerun()
+        
+        with action_col2:
+            if st.button("🗑️ Discard All", use_container_width=True):
+                discarded = db.discard_pending_changes()
+                st.info(f"Discarded {discarded} pending changes")
+                st.rerun()
+        
+        # Confirmation dialog for deletions
+        if st.session_state.get('confirm_apply_changes', False):
+            st.warning(f"⚠️ **Confirmation Required**")
+            st.error(f"This will **permanently delete {len(pending_deletes)} event(s)** from the database. This cannot be undone!")
+            
+            confirm_col1, confirm_col2 = st.columns(2)
+            with confirm_col1:
+                if st.button("✅ Yes, Apply All Changes", type="primary", use_container_width=True):
+                    result = db.apply_pending_changes()
+                    st.success(f"✅ Applied: {result['inserted']} inserted, {result['deleted']} deleted")
+                    st.session_state.confirm_apply_changes = False
+                    st.rerun()
+            with confirm_col2:
+                if st.button("❌ Cancel", use_container_width=True):
+                    st.session_state.confirm_apply_changes = False
+                    st.rerun()
+    
+    # --- EVENTS TO ADD (Green) ---
+    if pending_inserts:
+        st.markdown("---")
+        st.subheader("🆕 EVENTS TO ADD")
+        st.markdown("*These events were found in the scrape but don't exist in the database.*")
+        
+        # Group by source URL
+        inserts_by_source = {}
+        for change in pending_inserts:
+            event_data = change.get("event_data", {})
+            event_url = event_data.get("event_url", "")
+            from urllib.parse import urlparse
+            try:
+                domain = urlparse(event_url).netloc.replace("www.", "")
+            except:
+                domain = "Unknown"
+            if domain not in inserts_by_source:
+                inserts_by_source[domain] = []
+            inserts_by_source[domain].append(change)
+        
+        for source, changes in inserts_by_source.items():
+            with st.expander(f"🌐 {source} ({len(changes)} new)", expanded=True):
+                for change in changes:
+                    event_data = change.get("event_data", {})
+                    
+                    # Green-tinted card for inserts
+                    st.markdown(f"""
+                    <div style="border-left: 4px solid #22c55e; padding: 10px; margin: 10px 0; background-color: #f0fdf4; border-radius: 4px;">
+                        <strong style="color: #166534;">{event_data.get('event_name', 'Unknown')}</strong>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    col1, col2, col3 = st.columns(3)
+                    col1.caption(f"📅 {event_data.get('date_iso', 'N/A')}")
+                    col2.caption(f"📍 {event_data.get('location', 'N/A')}")
+                    col3.caption(f"⏰ {event_data.get('time', 'N/A')}")
+                    
+                    # Show description preview
+                    desc = event_data.get('description', '')
+                    if desc and len(desc) > 100:
+                        st.caption(f"📝 {desc[:100]}...")
+                    elif desc:
+                        st.caption(f"📝 {desc}")
+                    
+                    # Individual discard button
+                    if st.button(f"❌ Discard", key=f"discard_insert_{change['id']}", help="Remove this event from pending"):
+                        db.discard_single_change(change['id'])
+                        st.toast(f"Discarded: {event_data.get('event_name', 'Event')}")
+                        st.rerun()
+                    
+                    st.markdown("---")
+    
+    # --- EVENTS TO DELETE (Red) ---
+    if pending_deletes:
+        st.markdown("---")
+        st.subheader("🗑️ EVENTS TO DELETE")
+        st.markdown("*These events exist in the database but were **not found** in the latest scrape.*")
+        st.warning("⚠️ Applying these changes will **permanently remove** these events from the database.")
+        
+        # Group by source URL
+        deletes_by_source = {}
+        for change in pending_deletes:
+            event_data = change.get("event_data", {})
+            event_url = event_data.get("event_url", "")
+            from urllib.parse import urlparse
+            try:
+                domain = urlparse(event_url).netloc.replace("www.", "")
+            except:
+                domain = "Unknown"
+            if domain not in deletes_by_source:
+                deletes_by_source[domain] = []
+            deletes_by_source[domain].append(change)
+        
+        for source, changes in deletes_by_source.items():
+            with st.expander(f"🌐 {source} ({len(changes)} to delete)", expanded=True):
+                for change in changes:
+                    event_data = change.get("event_data", {})
+                    
+                    # Red-tinted card for deletes
+                    st.markdown(f"""
+                    <div style="border-left: 4px solid #ef4444; padding: 10px; margin: 10px 0; background-color: #fef2f2; border-radius: 4px;">
+                        <strong style="color: #991b1b;">{change.get('event_name') or event_data.get('event_name', 'Unknown')}</strong>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    col1, col2, col3 = st.columns(3)
+                    col1.caption(f"📅 {change.get('date_iso') or event_data.get('date_iso', 'N/A')}")
+                    col2.caption(f"📍 {change.get('location') or event_data.get('location', 'N/A')}")
+                    col3.caption(f"🔑 Key: {change.get('unique_key', 'N/A')[:16]}...")
+                    
+                    # Individual discard button (keeps event in DB)
+                    if st.button(f"↩️ Keep Event", key=f"discard_delete_{change['id']}", help="Remove from pending (event stays in DB)"):
+                        db.discard_single_change(change['id'])
+                        st.toast(f"Kept: {change.get('event_name', 'Event')} - removed from deletion queue")
+                        st.rerun()
+                    
+                    st.markdown("---")
+    
+    # --- RECENTLY ADDED EVENTS (for reference) ---
+    st.markdown("---")
+    st.subheader("📋 RECENTLY ADDED EVENTS")
+    st.caption("Events added to the database today (from baseline scraper or applied changes)")
+    
+    added_events = db.get_added_events_today()
+    
+    if added_events:
+        # Group by source URL
+        added_by_source = {}
+        for event in added_events:
+            from urllib.parse import urlparse
+            parsed = urlparse(event['event_url'])
+            domain = parsed.netloc.replace("www.", "")
+            if domain not in added_by_source:
+                added_by_source[domain] = []
+            added_by_source[domain].append(event)
+        
+        st.success(f"✅ **{len(added_events)}** event(s) added today")
+        
+        for source, events in added_by_source.items():
+            with st.expander(f"🌐 {source} ({len(events)} new)", expanded=False):
+                for event in events:
+                    st.markdown(f"**{event['event_name']}**")
+                    col1, col2, col3 = st.columns(3)
+                    col1.caption(f"📅 {event['date_iso']}")
+                    col2.caption(f"📍 {event.get('location', 'N/A')}")
+                    col3.caption(f"⏰ {event.get('time', 'N/A')}")
+                    st.markdown("---")
+    else:
+        st.info("No new events added today.")

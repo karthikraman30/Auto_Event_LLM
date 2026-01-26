@@ -175,23 +175,35 @@ class SimpleEventSpider(scrapy.Spider):
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             await page.wait_for_timeout(1000)
 
-        # Click Load More button (reduced limit for testing)
-        limit = 5  # Reduced for testing
+        # Click Load More button - increased for better coverage
+        # For Stockholm library and similar sites, need more clicks to load all events
+        if "biblioteket.stockholm.se" in response.url:
+            limit = 45  # Increased for Stockholm library to cover 10+ days
+        else:
+            limit = 20
         load_words = ["Visa fler", "Ladda fler", "Load more", "Show more", "More events", "Nästa", "Visa alla"]
-        for _ in range(limit): 
+        consecutive_failures = 0
+        for i in range(limit): 
             clicked = False
             for word in load_words:
                 btn = page.locator(f"button:has-text('{word}'), a:has-text('{word}')").first
                 if await btn.count() > 0 and await btn.is_visible():
                     try:
-                        self.logger.info(f"Clicking load button: '{word}'")
+                        self.logger.info(f"Clicking load button: '{word}' (iteration {i+1}/{limit})")
                         await btn.click(force=True, timeout=5000)
                         await page.wait_for_timeout(2000)
                         clicked = True
+                        consecutive_failures = 0
                         break 
                     except Exception:
                         pass
-            if not clicked: break 
+            if not clicked:
+                consecutive_failures += 1
+                if consecutive_failures >= 3:
+                    break
+                # Try scrolling to trigger lazy loading
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(1500) 
 
         # Get selectors from database
         selectors = self.db.get_selectors(response.url)

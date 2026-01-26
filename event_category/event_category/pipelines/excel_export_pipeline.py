@@ -45,8 +45,7 @@ class ExcelExportPipeline:
         # 4. Define Standard Headers
         fixed_headers = [
             "Event Name", "Date", "Date ISO", "End Date ISO", "Time", "Location", 
-            "Target Group", "Target Group Normalized", "Status", 
-            "Booking Info", "Description", "Event URL"
+            "Target Group", "Age Limit", "Status", "Booking Info", "Description", "Event URL"
         ]
         
         # Combine Fixed Headers + Dynamic Headers
@@ -60,22 +59,23 @@ class ExcelExportPipeline:
         for row_idx, item in enumerate(self.items, 2):
             adapter = ItemAdapter(item)
             
-            # Write Fixed Columns (1 to 11)
+            # Write Fixed Columns (1 to 12)
             worksheet.cell(row=row_idx, column=1, value=adapter.get("event_name", ""))
             worksheet.cell(row=row_idx, column=2, value=adapter.get("date", ""))
             worksheet.cell(row=row_idx, column=3, value=adapter.get("date_iso", ""))
             worksheet.cell(row=row_idx, column=4, value=adapter.get("end_date_iso", "N/A"))
             worksheet.cell(row=row_idx, column=5, value=adapter.get("time", ""))
             worksheet.cell(row=row_idx, column=6, value=adapter.get("location", ""))
-            worksheet.cell(row=row_idx, column=7, value=adapter.get("target_group", ""))
-            worksheet.cell(row=row_idx, column=8, value=adapter.get("target_group_normalized", ""))
+            # Use normalized target group values (e.g., "children", "adults", "families")
+            worksheet.cell(row=row_idx, column=7, value=adapter.get("target_group_normalized", "all_ages"))
+            worksheet.cell(row=row_idx, column=8, value=adapter.get("age_limit", "N/A"))
             worksheet.cell(row=row_idx, column=9, value=adapter.get("status", ""))
             worksheet.cell(row=row_idx, column=10, value=adapter.get("booking_info", "N/A"))
             worksheet.cell(row=row_idx, column=11, value=adapter.get("description", ""))
             worksheet.cell(row=row_idx, column=12, value=adapter.get("event_url", ""))
             
             
-            # Write Dynamic Columns (12 onwards)
+            # Write Dynamic Columns (13 onwards)
             # We look up the value in 'extra_attributes'. If not found, write empty string.
             extras = adapter.get("extra_attributes", {})
             for i, key in enumerate(sorted_dynamic_keys):

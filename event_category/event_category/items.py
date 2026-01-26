@@ -16,6 +16,8 @@ class EventCategoryItem(scrapy.Item):
     event_url = scrapy.Field()
     status = scrapy.Field()
     booking_info = scrapy.Field()  # [NEW] "Requires booking", "Drop-in", or "N/A"
+    image_url = scrapy.Field()  # [NEW] Event image/photo URL
+    age_limit = scrapy.Field()  # [NEW] Age range like "0-6", "8+", "12-15"
     extra_attributes = scrapy.Field()
     
     # [NEW] For DOM-rich JSON Lines output (new websites only)
