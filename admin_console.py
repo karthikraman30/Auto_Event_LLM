@@ -447,6 +447,8 @@ with tabs[0]:
     
     if scrape_btn:
         st.session_state.log_buffer = f"Starting parallel scrape for {scrape_days} days...\n"
+        # Log that we started a scrape (will be updated with final result)
+        db.add_log("Manual", "Started", 0, 0, [f"Started scrape for {scrape_days} days"])
         with st.spinner("Scraping all venues... check the Logs tab for progress."):
             try:
                 import subprocess
@@ -477,7 +479,11 @@ with tabs[0]:
                         failures = int(match.group(2))
                         status = "Warn" if failures > 0 else "OK"
                         db.add_log("Manual", status, events_count, failures, None)
-                    st.success("✅ Scrape completed successfully!")
+                        st.success(f"✅ Scrape completed! {events_count} events, {failures} failures")
+                    else:
+                        # Log anyway even if we can't parse the output
+                        db.add_log("Manual", "OK", 0, 0, ["Scrape completed but could not parse output"])
+                        st.success("✅ Scrape completed (output parsing issue)")
                     # Reset clear events confirmation after successful scrape
                     st.session_state.confirm_clear_events = False
                     st.rerun()  # Refresh to show new counts in metrics
