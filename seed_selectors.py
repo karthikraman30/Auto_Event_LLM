@@ -12,6 +12,10 @@ instead of using hardcoded values.
 
 Usage:
     python seed_selectors.py
+    
+Can also be imported and called programmatically:
+    from seed_selectors import ensure_selectors_seeded
+    ensure_selectors_seeded()  # Only seeds if DB is empty
 """
 
 import sqlite3
@@ -232,6 +236,75 @@ def seed_selectors():
     
     print(f"✅ Successfully seeded {len(selectors_config)} selector configurations!")
     print(f"   Database: {db_path}")
+    return len(selectors_config)
+
+
+def ensure_selectors_seeded(verbose=False):
+    """
+    Check if selectors.db has any selectors; if empty, seed with defaults.
+    
+    This is safe to call on every app startup - it only seeds if the database
+    is empty or missing, preventing duplicate entries.
+    
+    Args:
+        verbose: If True, print status messages
+        
+    Returns:
+        dict with status info: {'seeded': bool, 'count': int, 'message': str}
+    """
+    db_path = get_db_path()
+    
+    try:
+        conn = sqlite3.connect(db_path, timeout=30.0)
+        cursor = conn.cursor()
+        
+        # Ensure table exists
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS selector_configs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                domain TEXT NOT NULL,
+                url_pattern TEXT NOT NULL,
+                container_selector TEXT,
+                item_selectors_json TEXT,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(domain, url_pattern)
+            )
+        ''')
+        conn.commit()
+        
+        # Check if any selectors exist
+        cursor.execute("SELECT COUNT(*) FROM selector_configs")
+        count = cursor.fetchone()[0]
+        conn.close()
+        
+        if count == 0:
+            if verbose:
+                print("🔧 No selectors found in database. Auto-seeding...")
+            seeded_count = seed_selectors()
+            return {
+                'seeded': True,
+                'count': seeded_count,
+                'message': f'Auto-seeded {seeded_count} selector configurations'
+            }
+        else:
+            if verbose:
+                print(f"✓ Selectors database already has {count} configurations")
+            return {
+                'seeded': False,
+                'count': count,
+                'message': f'Database already has {count} selector configurations'
+            }
+            
+    except Exception as e:
+        error_msg = f"Error checking/seeding selectors: {e}"
+        if verbose:
+            print(f"❌ {error_msg}")
+        return {
+            'seeded': False,
+            'count': 0,
+            'message': error_msg
+        }
+
 
 if __name__ == "__main__":
     seed_selectors()

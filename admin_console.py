@@ -13,6 +13,11 @@ from apscheduler.triggers.date import DateTrigger
 
 sys.path.append(os.path.join(os.getcwd(), "event_category"))
 from event_category.utils.db_manager import DatabaseManager
+from seed_selectors import ensure_selectors_seeded
+
+# --- AUTO-SEED SELECTORS ON STARTUP ---
+# This ensures deployed apps have default selectors even though selectors.db is gitignored
+_seed_result = ensure_selectors_seeded(verbose=True)
 
 # --- FIX: Add Python path at module level for Streamlit Cloud ---
 # This ensures all functions can find the event_category modules
