@@ -365,6 +365,7 @@ def main(days=30, run_type='baseline', start_date=None):
             comparison = db.compare_and_stage_changes(scraped_events, start_date, end_date, str(run_id))
             staged_inserts = comparison["staged_inserts"]
             staged_deletes = comparison["staged_deletes"]
+            url_updates = comparison.get("url_updates", 0)
             
             db.update_last_incremental_run()
             
@@ -377,6 +378,8 @@ def main(days=30, run_type='baseline', start_date=None):
         
         print(f"Incremental scraping complete: {total_events} events scraped")
         print(f"  → Staged {staged_inserts} inserts, {staged_deletes} deletes for review")
+        if url_updates > 0:
+            print(f"  → Updated {url_updates} event URLs automatically")
     
     print(f"Scraping complete: {total_events} events, {failures} failures")
     

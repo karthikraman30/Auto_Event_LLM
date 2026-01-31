@@ -434,28 +434,42 @@ class UnifiedEventSpider(scrapy.Spider):
 
             # 3️⃣ Extract events FOR THIS DAY ONLY (if any exist)
             if events_found:
-                # Scroll to bottom to load all events (lazy loading)
+                # Click "Show more" button repeatedly to load ALL events
+                # Skansen hides some events behind this button!
                 try:
-                    max_scrolls = 10  # Increased from 5
-                    for scroll_attempt in range(max_scrolls):
-                        # Count current events before scrolling
-                        current_count = await page.locator("ul.calendarList__list li.calendarItem").count()
-                        
-                        # Scroll to bottom
+                    max_show_more_clicks = 10
+                    for click_attempt in range(max_show_more_clicks):
+                        # First scroll down to make the button visible
                         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                        await page.wait_for_timeout(1500)  # Increased wait time for lazy loading
+                        await page.wait_for_timeout(500)
                         
-                        # Check if new events loaded
-                        new_count = await page.locator("ul.calendarList__list li.calendarItem").count()
-                        if new_count == current_count:
-                            # No new events loaded, we've reached the end
-                            self.logger.info(f"Stopped scrolling at {new_count} events (no new events loaded)")
+                        # Look for "Show more" button
+                        show_more_btn = page.locator("button:has-text('Show more'), a:has-text('Show more'), .calendarList__button:has-text('Show more')")
+                        
+                        if await show_more_btn.count() > 0 and await show_more_btn.first.is_visible():
+                            # Count events before clicking
+                            before_count = await page.locator("ul.calendarList__list li.calendarItem").count()
+                            
+                            # Click "Show more"
+                            await show_more_btn.first.click()
+                            await page.wait_for_timeout(1500)  # Wait for new events to load
+                            
+                            # Count events after clicking
+                            after_count = await page.locator("ul.calendarList__list li.calendarItem").count()
+                            self.logger.info(f"Clicked 'Show more': {before_count} → {after_count} events")
+                            
+                            if after_count == before_count:
+                                # No new events loaded, button didn't work
+                                break
+                        else:
+                            # No more "Show more" button, all events loaded
+                            self.logger.info(f"No more 'Show more' button found")
                             break
                     
                     final_count = await page.locator("ul.calendarList__list li.calendarItem").count()
-                    self.logger.info(f"Loaded {final_count} events for {current_date} after {scroll_attempt + 1} scroll attempts")
+                    self.logger.info(f"Loaded {final_count} total events for {current_date}")
                 except Exception as e:
-                    self.logger.warning(f"Error during scroll loading: {e}")
+                    self.logger.warning(f"Error during 'Show more' loading: {e}")
                 
                 extracted = await self.extract_with_selectors(page, selectors)
 
@@ -490,7 +504,12 @@ class UnifiedEventSpider(scrapy.Spider):
                 next_btn = page.locator("button.link:has-text('Next day')")
                 if await next_btn.count() > 0 and await next_btn.is_visible():
                     await next_btn.click()
-                    await page.wait_for_timeout(500)
+                    # Wait longer for all events to load after navigation
+                    await page.wait_for_timeout(2000)
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=5000)
+                    except:
+                        pass  # Continue even if networkidle times out
                 else:
                     self.logger.info(f"No more 'Next day' button found after {day_num + 1} days")
                     break

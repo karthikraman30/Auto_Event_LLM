@@ -1420,6 +1420,25 @@ with tabs[4]:
     if total_pending == 0:
         st.info("✨ No pending changes. Run the **Incremental Scraper** from the Settings tab to detect changes.")
     else:
+        # Get the most recent detection timestamp from pending changes
+        all_changes = pending_inserts + pending_deletes
+        if all_changes:
+            latest_detected = max(c.get("detected_at", "") for c in all_changes if c.get("detected_at"))
+            if latest_detected:
+                try:
+                    # Parse and format the timestamp nicely
+                    from datetime import timezone, timedelta as td
+                    dt = datetime.strptime(latest_detected, "%Y-%m-%d %H:%M:%S")
+                    # Convert to IST (UTC+5:30)
+                    ist_offset = td(hours=5, minutes=30)
+                    dt_utc = dt.replace(tzinfo=timezone.utc)
+                    dt_ist = dt_utc.astimezone(timezone(ist_offset))
+                    formatted_date = dt_ist.strftime("%B %d, %Y at %H:%M")
+                except:
+                    formatted_date = latest_detected
+                
+                st.info(f"🕐 **Last Incremental Scrape:** {formatted_date}")
+        
         # Summary metrics
         summary_col1, summary_col2, summary_col3 = st.columns(3)
         with summary_col1:
@@ -1491,11 +1510,26 @@ with tabs[4]:
             with st.expander(f"🌐 {source} ({len(changes)} new)", expanded=True):
                 for change in changes:
                     event_data = change.get("event_data", {})
+                    detected_at = change.get("detected_at", "")
+                    
+                    # Format detection date
+                    detected_display = ""
+                    if detected_at:
+                        try:
+                            from datetime import timezone, timedelta as td
+                            dt = datetime.strptime(detected_at, "%Y-%m-%d %H:%M:%S")
+                            ist_offset = td(hours=5, minutes=30)
+                            dt_utc = dt.replace(tzinfo=timezone.utc)
+                            dt_ist = dt_utc.astimezone(timezone(ist_offset))
+                            detected_display = dt_ist.strftime("%b %d, %H:%M")
+                        except:
+                            detected_display = detected_at
                     
                     # Green-tinted card for inserts
                     st.markdown(f"""
                     <div style="border-left: 4px solid #22c55e; padding: 10px; margin: 10px 0; background-color: #f0fdf4; border-radius: 4px;">
                         <strong style="color: #166534;">{event_data.get('event_name', 'Unknown')}</strong>
+                        {f'<span style="float: right; color: #3b82f6; font-size: 14px; font-weight: 600;">🕐 {detected_display}</span>' if detected_display else ''}
                     </div>
                     """, unsafe_allow_html=True)
                     
@@ -1544,11 +1578,26 @@ with tabs[4]:
             with st.expander(f"🌐 {source} ({len(changes)} to delete)", expanded=True):
                 for change in changes:
                     event_data = change.get("event_data", {})
+                    detected_at = change.get("detected_at", "")
+                    
+                    # Format detection date
+                    detected_display = ""
+                    if detected_at:
+                        try:
+                            from datetime import timezone, timedelta as td
+                            dt = datetime.strptime(detected_at, "%Y-%m-%d %H:%M:%S")
+                            ist_offset = td(hours=5, minutes=30)
+                            dt_utc = dt.replace(tzinfo=timezone.utc)
+                            dt_ist = dt_utc.astimezone(timezone(ist_offset))
+                            detected_display = dt_ist.strftime("%b %d, %H:%M")
+                        except:
+                            detected_display = detected_at
                     
                     # Red-tinted card for deletes
                     st.markdown(f"""
                     <div style="border-left: 4px solid #ef4444; padding: 10px; margin: 10px 0; background-color: #fef2f2; border-radius: 4px;">
                         <strong style="color: #991b1b;">{change.get('event_name') or event_data.get('event_name', 'Unknown')}</strong>
+                        {f'<span style="float: right; color: #3b82f6; font-size: 14px; font-weight: 600;">🕐 {detected_display}</span>' if detected_display else ''}
                     </div>
                     """, unsafe_allow_html=True)
                     

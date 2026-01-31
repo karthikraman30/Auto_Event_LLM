@@ -1175,32 +1175,20 @@ class DatabaseManager:
     def generate_unique_key(event_data):
         """Generate a stable unique key for an event.
         
-        Uses event_url as base, or creates canonical key from name+date+location.
-        For events with URL fragments (#), strips them to ensure consistency.
+        Uses event_name + date_iso + location for stability.
+        URLs can change (website restructuring), but name/date/location is stable.
         """
         import hashlib
         
-        event_url = event_data.get('event_url', '')
         event_name = event_data.get('event_name', '')
         date_iso = event_data.get('date_iso', '')
         location = event_data.get('location', '')
         
-        # Strip URL fragments for consistency
-        if '#' in event_url and 'biblioteket.stockholm.se' not in event_url:
-            event_url = event_url.split('#')[0]
+        # Normalize empty locations
+        if not location or location == 'N/A':
+            location = ''
         
-        # Prefer URL as stable identifier if it exists and is meaningful
-        if event_url and event_url != 'N/A' and not event_url.startswith('http://example.com'):
-            # For Stockholm library, include time/location in hash since URL is generic
-            if 'biblioteket.stockholm.se' in event_url:
-                unique_str = f"{event_name}|{date_iso}|{event_data.get('time', '')}|{location}"
-                return hashlib.sha256(unique_str.encode('utf-8')).hexdigest()[:32]
-            else:
-                # Use URL + date as unique key for non-Stockholm sites
-                unique_str = f"{event_url}|{date_iso}"
-                return hashlib.sha256(unique_str.encode('utf-8')).hexdigest()[:32]
-        
-        # Fallback: canonical key from name+date+location
+        # Create canonical key from name+date+location (most stable fields)
         unique_str = f"{event_name}|{date_iso}|{location}"
         return hashlib.sha256(unique_str.encode('utf-8')).hexdigest()[:32]
     
@@ -1577,6 +1565,7 @@ class DatabaseManager:
         
         staged_inserts = 0
         staged_deletes = 0
+        url_updates = 0
         
         # Find events to INSERT (in scraped but not in DB) - only within date range
         for event in scraped_events_in_range:
@@ -1590,7 +1579,36 @@ class DatabaseManager:
                 if self.stage_delete(db_event, run_id):
                     staged_deletes += 1
         
-        return {"staged_inserts": staged_inserts, "staged_deletes": staged_deletes}
+        # Check for URL changes - update automatically (no approval needed)
+        # If unique_key matches but URL is different, update the URL in DB
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        cursor = conn.cursor()
+        
+        for event in scraped_events_in_range:
+            unique_key = event.get('unique_key')
+            if unique_key and unique_key in db_events:
+                db_event = db_events[unique_key]
+                new_url = event.get('event_url', '')
+                old_url = db_event.get('event_url', '')
+                
+                # Check if URL changed (normalize by stripping trailing slashes)
+                if new_url and old_url and new_url.rstrip('/') != old_url.rstrip('/'):
+                    # Update the URL in database
+                    cursor.execute('''
+                        UPDATE events 
+                        SET event_url = ?, last_scraped = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                    ''', (new_url, db_event['id']))
+                    url_updates += 1
+                    print(f"[URL UPDATE] {db_event['event_name']} ({db_event['date_iso']}): {old_url} → {new_url}")
+        
+        conn.commit()
+        conn.close()
+        
+        if url_updates > 0:
+            print(f"  → Updated {url_updates} event URLs")
+        
+        return {"staged_inserts": staged_inserts, "staged_deletes": staged_deletes, "url_updates": url_updates}
     
     def get_events_in_date_range(self, start_date, end_date):
         """Get all events within a date range."""
