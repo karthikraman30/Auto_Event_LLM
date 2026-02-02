@@ -37,11 +37,11 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 # Obey robots.txt rules
 ROBOTSTXT_OBEY = True
 
-# Concurrency and throttling settings (OPTIMIZED for speed)
-CONCURRENT_REQUESTS = 8  # [NEW] Enable parallel requests
-CONCURRENT_REQUESTS_PER_DOMAIN = 4  # [MODIFIED] Increase from 1 to 4
-DOWNLOAD_DELAY = 0.3  # [MODIFIED] Reduce from 1s to 0.3s
-DOWNLOAD_TIMEOUT = 60  # [NEW] 60 second timeout for downloads
+# Concurrency and throttling settings (OPTIMIZED for speed but stable)
+CONCURRENT_REQUESTS = 6  # Reduced from 8 to prevent overwhelming detail pages
+CONCURRENT_REQUESTS_PER_DOMAIN = 2  # Reduced from 4 to 2 for stability
+DOWNLOAD_DELAY = 0.5  # Increased from 0.3s to 0.5s to reduce load
+DOWNLOAD_TIMEOUT = 90  # Increased from 60 to 90 seconds for detail pages
 
 # Disable cookies (enabled by default)
 #COOKIES_ENABLED = False
@@ -132,4 +132,4 @@ PLAYWRIGHT_CONTEXTS = {
 }
 
 # Default timeout for playwright operations (in milliseconds)
-PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT = 60000
+PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT = 45000  # Reduced from 60s to 45s to fail faster

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Migration Script: Seed selectors.db with hardcoded selectors from universal_spider.py
+Migration Script: Seed Supabase with hardcoded selectors from universal_spider.py
 
 This script migrates the hardcoded CSS selectors for:
 1. Stockholm Library (biblioteket.stockholm.se/evenemang)
 2. Stockholm Library Preschools (biblioteket.stockholm.se/forskolor)  
 3. Skansen fallback selectors (skansen.se/en/calendar/)
 
-Run this once to populate the database, then the spider will read from selectors.db
+Run this once to populate the database, then the spider will read from Supabase
 instead of using hardcoded values.
 
 Usage:
@@ -18,45 +18,61 @@ Can also be imported and called programmatically:
     ensure_selectors_seeded()  # Only seeds if DB is empty
 """
 
-import sqlite3
 import json
 import os
 from datetime import datetime
 
-# Database path - try multiple locations
-DB_PATHS = [
-    "selectors.db",
-    "event_category/selectors.db",
-]
+# Try to import supabase
+try:
+    from supabase import create_client, Client
+    SUPABASE_AVAILABLE = True
+except ImportError:
+    SUPABASE_AVAILABLE = False
 
-def get_db_path():
-    """Find the selectors.db file."""
-    for path in DB_PATHS:
-        if os.path.exists(path):
-            print(f"✓ Found database at: {path}")
-            return path
-    # Default to event_category path if creating new
-    return "event_category/selectors.db"
+# Try to import streamlit for secrets
+try:
+    import streamlit as st
+    STREAMLIT_AVAILABLE = True
+except ImportError:
+    STREAMLIT_AVAILABLE = False
+
+
+def get_supabase_client():
+    """Get Supabase client with credentials from secrets or env vars."""
+    if not SUPABASE_AVAILABLE:
+        raise ImportError("supabase package not installed. Run: pip install supabase")
+    
+    url = None
+    key = None
+    
+    # Try Streamlit secrets first
+    if STREAMLIT_AVAILABLE:
+        try:
+            url = st.secrets.get("SUPABASE_URL")
+            key = st.secrets.get("SUPABASE_KEY")
+        except Exception:
+            pass
+    
+    # Fall back to environment variables
+    if not url:
+        url = os.environ.get("SUPABASE_URL")
+    if not key:
+        key = os.environ.get("SUPABASE_KEY")
+    
+    if not url or not key:
+        raise ValueError(
+            "Supabase credentials not found. Set SUPABASE_URL and SUPABASE_KEY in:\n"
+            "  - Streamlit secrets (.streamlit/secrets.toml), or\n"
+            "  - Environment variables"
+        )
+    
+    return create_client(url, key)
 
 def seed_selectors():
     """Seed the database with hardcoded selectors."""
     
-    db_path = get_db_path()
-    conn = sqlite3.connect(db_path, timeout=30.0)
-    cursor = conn.cursor()
-    
-    # Ensure table exists
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS selector_configs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            domain TEXT NOT NULL,
-            url_pattern TEXT NOT NULL,
-            container_selector TEXT,
-            item_selectors_json TEXT,
-            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(domain, url_pattern)
-        )
-    ''')
+    supabase = get_supabase_client()
+    print("✓ Connected to Supabase")
     
     # ===========================================
     # SELECTORS TO MIGRATE (ALL 5 SITES)
@@ -192,7 +208,7 @@ def seed_selectors():
     # INSERT/UPDATE SELECTORS
     # ===========================================
     
-    print("\n📦 Seeding selectors into database...\n")
+    print("\n📦 Seeding selectors into Supabase...\n")
     
     for config in selectors_config:
         domain = config["domain"]
@@ -200,48 +216,47 @@ def seed_selectors():
         container = config["container"]
         items_json = json.dumps(config["items"])
         
-        cursor.execute('''
-            INSERT INTO selector_configs (domain, url_pattern, container_selector, item_selectors_json, last_updated)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(domain, url_pattern) DO UPDATE SET
-                container_selector = excluded.container_selector,
-                item_selectors_json = excluded.item_selectors_json,
-                last_updated = excluded.last_updated
-        ''', (domain, url_pattern, container, items_json, datetime.now().isoformat()))
+        # Upsert into Supabase
+        supabase.table('selector_configs').upsert({
+            'domain': domain,
+            'url_pattern': url_pattern,
+            'container_selector': container,
+            'item_selectors_json': items_json,
+            'last_updated': datetime.now().isoformat()
+        }, on_conflict='domain,url_pattern').execute()
         
         print(f"  ✓ {domain}{url_pattern}")
         print(f"    Container: {container}")
         print(f"    Fields: {list(config['items'].keys())}")
         print()
     
-    conn.commit()
-    
     # ===========================================
     # VERIFY
     # ===========================================
     
-    print("📋 Verification - Current selectors in database:\n")
-    cursor.execute("SELECT domain, url_pattern, container_selector, item_selectors_json FROM selector_configs")
-    rows = cursor.fetchall()
+    print("📋 Verification - Current selectors in Supabase:\n")
+    response = supabase.table('selector_configs').select('domain, url_pattern, container_selector, item_selectors_json').execute()
+    rows = response.data or []
     
     for row in rows:
-        domain, pattern, container, items = row
+        domain = row['domain']
+        pattern = row['url_pattern']
+        container = row['container_selector']
+        items = row['item_selectors_json']
         items_dict = json.loads(items) if items else {}
         print(f"  • {domain}{pattern}")
         print(f"    Container: {container}")
         print(f"    Fields: {list(items_dict.keys())}")
         print()
     
-    conn.close()
-    
     print(f"✅ Successfully seeded {len(selectors_config)} selector configurations!")
-    print(f"   Database: {db_path}")
+    print(f"   Database: Supabase Cloud")
     return len(selectors_config)
 
 
 def ensure_selectors_seeded(verbose=False):
     """
-    Check if selectors.db has any selectors; if empty, seed with defaults.
+    Check if Supabase has any selectors; if empty, seed with defaults.
     
     This is safe to call on every app startup - it only seeds if the database
     is empty or missing, preventing duplicate entries.
@@ -252,34 +267,16 @@ def ensure_selectors_seeded(verbose=False):
     Returns:
         dict with status info: {'seeded': bool, 'count': int, 'message': str}
     """
-    db_path = get_db_path()
-    
     try:
-        conn = sqlite3.connect(db_path, timeout=30.0)
-        cursor = conn.cursor()
-        
-        # Ensure table exists
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS selector_configs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                domain TEXT NOT NULL,
-                url_pattern TEXT NOT NULL,
-                container_selector TEXT,
-                item_selectors_json TEXT,
-                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(domain, url_pattern)
-            )
-        ''')
-        conn.commit()
+        supabase = get_supabase_client()
         
         # Check if any selectors exist
-        cursor.execute("SELECT COUNT(*) FROM selector_configs")
-        count = cursor.fetchone()[0]
-        conn.close()
+        response = supabase.table('selector_configs').select('id', count='exact').execute()
+        count = response.count or 0
         
         if count == 0:
             if verbose:
-                print("🔧 No selectors found in database. Auto-seeding...")
+                print("🔧 No selectors found in Supabase. Auto-seeding...")
             seeded_count = seed_selectors()
             return {
                 'seeded': True,
@@ -288,7 +285,7 @@ def ensure_selectors_seeded(verbose=False):
             }
         else:
             if verbose:
-                print(f"✓ Selectors database already has {count} configurations")
+                print(f"✓ Supabase already has {count} selector configurations")
             return {
                 'seeded': False,
                 'count': count,

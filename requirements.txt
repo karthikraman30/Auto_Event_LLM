@@ -63,3 +63,4 @@ python-dotenv==1.0.0
 google-generativeai==0.3.1
 cloudscraper==1.2.71
 beautifulsoup4==4.12.3
+supabase>=2.0.0

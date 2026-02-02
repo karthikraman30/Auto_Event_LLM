@@ -1104,12 +1104,12 @@ class UnifiedEventSpider(scrapy.Spider):
 
     async def handle_generic(self, page, response):
         # Scroll and click "load more" buttons to get all events
-        # Calculate max iterations based on scrape_days to ensure we load enough events
+        # OPTIMIZED: Track event count to detect when no more events are loading
         # Stockholm library typically shows ~25-30 events per page, each click loads ~10-15 more
-        # For 10 days with ~30 events/day = 300 events, need ~30+ clicks to be safe
         if "biblioteket.stockholm.se" in response.url:
-            # For Stockholm: base of 15 clicks + 2 clicks per day, capped at 50 max
-            max_iterations = min(50, max(30, 15 + (self.scrape_days * 2)))
+            # For Stockholm: Allow enough iterations for full month but with smart early exit
+            # With early exit detection, we can safely set a high limit
+            max_iterations = min(50, max(30, 20 + self.scrape_days))
         else:
             max_iterations = 20
         
@@ -1119,18 +1119,36 @@ class UnifiedEventSpider(scrapy.Spider):
         
         self.logger.info(f"Starting load more loop (max {max_iterations} iterations for {self.scrape_days} days)")
         consecutive_failures = 0
+        no_new_events_count = 0
+        previous_event_count = 0
+        
         for i in range(max_iterations):
             clicked = False
             for word in ["Visa fler", "Ladda fler", "Load more", "Visa mer"]:
                 try:
                     btn = page.locator(f"button:has-text('{word}'), a:has-text('{word}')").first
                     if await btn.count() > 0 and await btn.is_visible():
-                        self.logger.info(f"Clicking '{word}' button (iteration {i+1}/{max_iterations})")
+                        # Count events before clicking to detect if button actually loads more
+                        current_event_count = await page.locator("article, .event, .card, li[class*='event']").count()
+                        
+                        self.logger.info(f"Clicking '{word}' button (iteration {i+1}/{max_iterations}, {current_event_count} events visible)")
                         await btn.click(force=True, timeout=3000)
-                        # Wait longer and scroll to allow content to load
-                        await page.wait_for_timeout(2500)
+                        # Reduced wait time for better performance
+                        await page.wait_for_timeout(1500)
                         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                        await page.wait_for_timeout(1000)
+                        await page.wait_for_timeout(800)
+                        
+                        # Check if new events were loaded
+                        new_event_count = await page.locator("article, .event, .card, li[class*='event']").count()
+                        if new_event_count == current_event_count:
+                            no_new_events_count += 1
+                            self.logger.info(f"No new events loaded ({no_new_events_count}/3 strikes)")
+                            if no_new_events_count >= 3:
+                                self.logger.info(f"Button stopped loading events after {i+1} clicks, stopping")
+                                break  # Exit loop - no more events to load
+                        else:
+                            no_new_events_count = 0  # Reset counter if events loaded
+                        
                         clicked = True
                         consecutive_failures = 0
                         break
@@ -1143,7 +1161,7 @@ class UnifiedEventSpider(scrapy.Spider):
                 if consecutive_failures <= 3:
                     self.logger.info(f"No load button found, scrolling to try loading more (attempt {consecutive_failures}/3)")
                     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    await page.wait_for_timeout(2000)
+                    await page.wait_for_timeout(1500)
                 else:
                     self.logger.info(f"No more load buttons found after {consecutive_failures} attempts, stopping after {i+1} iterations")
                     break
@@ -1363,19 +1381,36 @@ class UnifiedEventSpider(scrapy.Spider):
         item = response.meta.get('item')
         if not item:
             if page:
-                await page.close()
+                try:
+                    await page.close()
+                except:
+                    pass
             return
+        
         desc = 'N/A'
-        if page:
-            for sel in ['.description', '.event-description', '[class*="description"]', 'p', '.content']:
-                els = page.locator(sel)
-                if await els.count() > 0:
-                    texts = await els.all_inner_texts()
-                    valid = [t.strip() for t in texts if len(t.strip()) > 20]
-                    if valid:
-                        desc = max(valid, key=len)[:500]
-                        break
-            await page.close()
+        try:
+            if page:
+                for sel in ['.description', '.event-description', '[class*="description"]', 'p', '.content']:
+                    try:
+                        els = page.locator(sel)
+                        if await els.count() > 0:
+                            texts = await els.all_inner_texts()
+                            valid = [t.strip() for t in texts if len(t.strip()) > 20]
+                            if valid:
+                                desc = max(valid, key=len)[:500]
+                                break
+                    except Exception as e:
+                        self.logger.debug(f"Error extracting description with selector {sel}: {e}")
+                        continue
+        except Exception as e:
+            self.logger.warning(f"Error in parse_detail for {item.get('event_url')}: {e}")
+        finally:
+            if page:
+                try:
+                    await page.close()
+                except Exception as e:
+                    self.logger.debug(f"Error closing page: {e}")
+        
         item['description'] = desc
         item['age_limit'] = 'N/A'  # Set to N/A for general detail parsing
         yield item

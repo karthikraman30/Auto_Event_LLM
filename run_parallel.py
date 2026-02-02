@@ -96,8 +96,38 @@ def run_spider(args):
         )
         print(f"[DEBUG] run_spider: Command stdout: {result.stdout}")
         print(f"[DEBUG] run_spider: Command stderr: {result.stderr}")
+        
+        # Check for HTTP errors in stderr (spider may complete but with errors)
+        stderr_lower = result.stderr.lower() if result.stderr else ''
+        http_error = None
+        if 'response <403' in stderr_lower or 'status_count/403' in stderr_lower:
+            http_error = "HTTP 403 Forbidden - Website is blocking the scraper or is down for maintenance"
+        elif 'response <404' in stderr_lower or 'status_count/404' in stderr_lower:
+            http_error = "HTTP 404 Not Found - Page URL may have changed"
+        elif 'response <5' in stderr_lower or 'status_count/50' in stderr_lower:
+            http_error = "HTTP 5xx Server Error - Website is experiencing issues"
+        elif 'connectionlost' in stderr_lower or 'connection refused' in stderr_lower:
+            http_error = "Connection Error - Could not reach the website"
+        elif 'timeout' in stderr_lower and 'gave up' in stderr_lower:
+            http_error = "Connection Timeout - Website took too long to respond"
+        
         if os.path.exists(full_output_path):
-            return {"url": url, "path": full_output_path, "success": True, "error": None}
+            # Check if the output file has actual events or is empty
+            try:
+                with open(full_output_path, 'r') as f:
+                    content = f.read().strip()
+                    events = json.loads(content) if content else []
+                    if len(events) == 0 and http_error:
+                        # File exists but empty due to HTTP error - this is a failure
+                        return {"url": url, "path": None, "success": False, "error": http_error}
+                    elif len(events) == 0 and not http_error:
+                        # File exists but empty without HTTP error - could be no events in date range
+                        # Check if there were any actual page responses
+                        if 'scraped 0 items' in stderr_lower and 'httperror/response_ignored' in stderr_lower:
+                            return {"url": url, "path": None, "success": False, "error": http_error or "No events scraped - page may have returned an error"}
+                    return {"url": url, "path": full_output_path, "success": True, "error": None}
+            except (json.JSONDecodeError, IOError) as e:
+                return {"url": url, "path": None, "success": False, "error": f"Failed to read output file: {str(e)}"}
         return {"url": url, "path": None, "success": False, "error": f"Output file not created. stdout: {result.stdout[-500:] if result.stdout else 'empty'}"}
     except subprocess.TimeoutExpired:
         return {"url": url, "path": None, "success": False, "error": "Timeout after 30 minutes"}
@@ -132,21 +162,41 @@ def merge_to_db(results):
             try:
                 print(f"[DEBUG] merge_to_db: Reading file: {result['path']}")
                 with open(result["path"], 'r', encoding='utf-8') as f:
-                    events = json.load(f)
-                    print(f"[DEBUG] merge_to_db: Found {len(events)} events in file")
-                    
-                    for j, event in enumerate(events):
-                        try:
-                            print(f"[DEBUG] merge_to_db: Inserting event {j+1}/{len(events)}")
-                            db.upsert_event(event)
-                            all_events.append(event)
-                        except Exception as e:
-                            print(f"[DEBUG] merge_to_db: Failed to upsert event {j+1}: {e}")
-                            print(f"[DEBUG] merge_to_db: Event data: {event}")
-                            continue
-                    
-                    total_events += len(events)
-                    print(f"[DEBUG] merge_to_db: Successfully processed {len(events)} events")
+                    content = f.read()
+                
+                # Handle possible malformed JSON (multiple arrays concatenated)
+                try:
+                    events = json.loads(content)
+                except json.JSONDecodeError as je:
+                    print(f"[DEBUG] merge_to_db: JSON decode error - {je}, trying to fix...")
+                    # Find the first complete JSON array
+                    bracket_count = 0
+                    end_pos = 0
+                    for idx, char in enumerate(content):
+                        if char == '[':
+                            bracket_count += 1
+                        elif char == ']':
+                            bracket_count -= 1
+                            if bracket_count == 0:
+                                end_pos = idx + 1
+                                break
+                    events = json.loads(content[:end_pos])
+                    print(f"[DEBUG] merge_to_db: Fixed JSON, found {len(events)} events in first array")
+                
+                print(f"[DEBUG] merge_to_db: Found {len(events)} events in file")
+                
+                for j, event in enumerate(events):
+                    try:
+                        print(f"[DEBUG] merge_to_db: Inserting event {j+1}/{len(events)}")
+                        db.upsert_event(event)
+                        all_events.append(event)
+                    except Exception as e:
+                        print(f"[DEBUG] merge_to_db: Failed to upsert event {j+1}: {e}")
+                        print(f"[DEBUG] merge_to_db: Event data: {event}")
+                        continue
+                
+                total_events += len(events)
+                print(f"[DEBUG] merge_to_db: Successfully processed {len(events)} events")
                 os.remove(result["path"])
                 print(f"[DEBUG] merge_to_db: Removed temp file: {result['path']}")
             except Exception as e:
@@ -172,8 +222,26 @@ def collect_scraped_events(results):
         if result["success"] and result["path"] and os.path.exists(result["path"]):
             try:
                 with open(result["path"], 'r', encoding='utf-8') as f:
-                    events = json.load(f)
-                    all_events.extend(events)
+                    content = f.read()
+                
+                # Handle possible malformed JSON (multiple arrays concatenated)
+                try:
+                    events = json.loads(content)
+                except json.JSONDecodeError:
+                    # Find the first complete JSON array
+                    bracket_count = 0
+                    end_pos = 0
+                    for idx, char in enumerate(content):
+                        if char == '[':
+                            bracket_count += 1
+                        elif char == ']':
+                            bracket_count -= 1
+                            if bracket_count == 0:
+                                end_pos = idx + 1
+                                break
+                    events = json.loads(content[:end_pos])
+                
+                all_events.extend(events)
                 os.remove(result["path"])
             except Exception as e:
                 print(f"[DEBUG] collect_scraped_events: Failed to process {result['path']}: {e}")

@@ -50,6 +50,7 @@ Thumbs.db
 .env
 *.env
 
+
 .early.coverage
 
 # Data output
@@ -75,3 +76,4 @@ insert_*.py
 BUG_FIXES_*.md
 TIMEZONE_FIX_NOTES.md
 
+.streamlit/secrets.toml
