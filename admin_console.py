@@ -217,6 +217,14 @@ def get_subprocess_env():
     """
     env = os.environ.copy()
     
+    # --- FIX: Set SSL certificate path for macOS ---
+    try:
+        import certifi
+        env['SSL_CERT_FILE'] = certifi.where()
+        env['REQUESTS_CA_BUNDLE'] = certifi.where()
+    except ImportError:
+        pass  # certifi not installed, use system defaults
+    
     # --- FIX: Set the Python Path for the Subprocess ---
     current_dir = os.getcwd()
     # This points to the folder containing the 'event_category' package
@@ -980,7 +988,14 @@ with tabs[1]:
         if st.button("🔄 Run Incremental Now", use_container_width=True):
             with st.spinner("Running Incremental scraper (next 5-6 days)..."):
                 try:
+                    print("[INCREMENTAL] Starting incremental scraper...")
+                    print(f"[INCREMENTAL] Using Python: {VENV_PYTHON}")
+                    print(f"[INCREMENTAL] CWD: {os.getcwd()}")
                     env = get_subprocess_env()
+                    print("[INCREMENTAL] Environment prepared, launching subprocess...")
+                    import sys
+                    sys.stdout.flush()  # Force flush to show in logs immediately
+                    
                     result = subprocess.run(
                         [VENV_PYTHON, RUN_PARALLEL_FILE, "--run-type", "incremental"],
                         cwd=os.getcwd(),
@@ -989,6 +1004,11 @@ with tabs[1]:
                         timeout=2700,
                         env=env
                     )
+                    
+                    print(f"[INCREMENTAL] Subprocess completed with return code: {result.returncode}")
+                    print(f"[INCREMENTAL] STDOUT: {result.stdout[-2000:] if result.stdout else 'empty'}")
+                    print(f"[INCREMENTAL] STDERR: {result.stderr[-1000:] if result.stderr else 'empty'}")
+                    sys.stdout.flush()
                     
                     if result.returncode == 0:
                         # Parse staged changes from output

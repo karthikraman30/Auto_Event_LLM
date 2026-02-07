@@ -1,6 +1,15 @@
 import os
 import json
 import hashlib
+
+# Fix SSL certificate verification for macOS
+try:
+    import certifi
+    os.environ['SSL_CERT_FILE'] = certifi.where()
+    os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
+except ImportError:
+    pass  # certifi not installed, use system defaults
+
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
