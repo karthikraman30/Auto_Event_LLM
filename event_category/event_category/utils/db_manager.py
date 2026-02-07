@@ -316,25 +316,30 @@ class DatabaseManager:
         return venues
 
     def get_unique_sources(self):
-        """Get list of unique source websites with friendly names."""
+        """Get list of unique source websites with friendly names.
+        
+        Uses per-domain existence checks to avoid Supabase's 1000-row default limit.
+        """
         # Get all scraping URLs with names
         urls_response = self.supabase.table('scraping_urls').select('url, name').order('name').execute()
-        url_name_map = {r['url']: r['name'] for r in (urls_response.data or [])}
         
-        # Get unique domains from event URLs
-        events_response = self.supabase.table('events').select('event_url').not_.is_('event_url', 'null').execute()
-        event_urls = [r['event_url'] for r in (events_response.data or []) if r.get('event_url')]
+        sources = []
+        for row in (urls_response.data or []):
+            scrape_url = row['url']
+            name = row['name']
+            domain = urlparse(scrape_url).netloc.replace("www.", "")
+            
+            # Check if any events exist for this domain (avoids 1000-row limit)
+            check = self.supabase.table('events')\
+                .select('id', count='exact')\
+                .ilike('event_url', f'%{domain}%')\
+                .limit(1)\
+                .execute()
+            
+            if check.count and check.count > 0:
+                sources.append(name)
         
-        sources = set()
-        for event_url in event_urls:
-            event_domain = urlparse(event_url).netloc.replace("www.", "")
-            for scrape_url, name in url_name_map.items():
-                scrape_domain = urlparse(scrape_url).netloc.replace("www.", "")
-                if event_domain == scrape_domain:
-                    sources.add(name)
-                    break
-        
-        return sorted(list(sources))
+        return sorted(sources)
 
     # ==================== SETTINGS ====================
     
@@ -656,47 +661,16 @@ class DatabaseManager:
     
     @staticmethod
     def generate_unique_key(event_data):
-        """Generate a stable unique key for an event.
-        
-        Uses the same 4 fields as the baseline upsert's on_conflict:
-        event_name, date_iso, event_url, location
-        
-        This ensures both incremental and baseline scrapers have consistent
-        deduplication behavior.
-        """
+        """Generate a stable unique key for an event."""
         event_name = event_data.get('event_name', '')
         date_iso = event_data.get('date_iso', '')
-        event_url = event_data.get('event_url', '')
         location = event_data.get('location', '')
         
         if not location or location == 'N/A':
             location = ''
         
-        # Match baseline's on_conflict: 'event_name,date_iso,event_url,location'
-        unique_str = f"{event_name}|{date_iso}|{event_url}|{location}"
+        unique_str = f"{event_name}|{date_iso}|{location}"
         return hashlib.sha256(unique_str.encode('utf-8')).hexdigest()[:32]
-    
-    @staticmethod
-    def generate_identity_key(event_data):
-        """Generate an identity key for URL update detection.
-        
-        Uses 4 fields: event_name, date_iso, time, location
-        This identifies the "same event" regardless of URL changes.
-        If two events have the same identity key but different URLs,
-        we treat it as a URL change (not a new event).
-        """
-        event_name = event_data.get('event_name', '')
-        date_iso = event_data.get('date_iso', '')
-        time = event_data.get('time', '')
-        location = event_data.get('location', '')
-        
-        if not location or location == 'N/A':
-            location = ''
-        if not time or time == 'N/A':
-            time = ''
-        
-        identity_str = f"{event_name}|{date_iso}|{time}|{location}"
-        return hashlib.sha256(identity_str.encode('utf-8')).hexdigest()[:32]
     
     def log_scrape_run(self, run_type, window_days):
         """Log metadata for a scrape run and return the run ID."""
@@ -884,12 +858,7 @@ class DatabaseManager:
     # ==================== INCREMENTAL COMPARISON ====================
     
     def compare_and_stage_changes(self, scraped_events, start_date, end_date, run_id=None):
-        """Compare scraped events against DB and stage changes.
-        
-        Uses a two-key approach:
-        1. Identity key (name+date+time+location) - detects URL changes
-        2. Unique key (name+date+url+location) - detects new/deleted events
-        """
+        """Compare scraped events against DB and stage changes."""
         # Extract unique domains from scraped events
         scraped_domains = set()
         for event in scraped_events:
@@ -902,7 +871,7 @@ class DatabaseManager:
                     pass
         
         if not scraped_domains:
-            return {"staged_inserts": 0, "staged_deletes": 0, "url_updates": 0}
+            return {"staged_inserts": 0, "staged_deletes": 0}
         
         # Get existing events in date range filtered by domains
         all_db_events = []
@@ -914,71 +883,51 @@ class DatabaseManager:
             ).execute()
             all_db_events.extend(response.data or [])
         
-        # Build maps for both key types
-        db_by_unique_key = {e['unique_key']: e for e in all_db_events if e.get('unique_key')}
-        db_by_identity_key = {}
-        for e in all_db_events:
-            identity_key = self.generate_identity_key(e)
-            db_by_identity_key[identity_key] = e
+        db_events = {e['unique_key']: e for e in all_db_events if e.get('unique_key')}
         
-        # Process scraped events within date range
+        # Build set of scraped unique keys within date range
         scraped_keys = set()
-        scraped_identity_keys = set()
         scraped_events_in_range = []
         for event in scraped_events:
             event_date = event.get('date_iso', '')
             if event_date and (event_date < start_date or event_date > end_date):
                 continue
             unique_key = self.generate_unique_key(event)
-            identity_key = self.generate_identity_key(event)
             event['unique_key'] = unique_key
-            event['identity_key'] = identity_key
             scraped_keys.add(unique_key)
-            scraped_identity_keys.add(identity_key)
             scraped_events_in_range.append(event)
         
         staged_inserts = 0
         staged_deletes = 0
         url_updates = 0
         
-        # STEP 1: Check for URL changes using identity key
-        # If identity matches but URL differs, auto-update URL in DB
+        # Find events to INSERT
         for event in scraped_events_in_range:
-            identity_key = event.get('identity_key')
-            if identity_key and identity_key in db_by_identity_key:
-                db_event = db_by_identity_key[identity_key]
+            if event['unique_key'] not in db_events:
+                if self.stage_insert(event, run_id):
+                    staged_inserts += 1
+        
+        # Find events to DELETE
+        for unique_key, db_event in db_events.items():
+            if unique_key not in scraped_keys:
+                if self.stage_delete(db_event, run_id):
+                    staged_deletes += 1
+        
+        # Check for URL changes - update automatically
+        for event in scraped_events_in_range:
+            unique_key = event.get('unique_key')
+            if unique_key and unique_key in db_events:
+                db_event = db_events[unique_key]
                 new_url = event.get('event_url', '')
                 old_url = db_event.get('event_url', '')
                 
                 if new_url and old_url and new_url.rstrip('/') != old_url.rstrip('/'):
-                    # Same event (by identity), but URL changed - update it
                     self.supabase.table('events').update({
                         'event_url': new_url,
-                        'unique_key': event['unique_key'],  # Update unique_key too
                         'last_scraped': datetime.now().isoformat()
                     }).eq('id', db_event['id']).execute()
                     url_updates += 1
                     print(f"[URL UPDATE] {db_event['event_name']} ({db_event['date_iso']}): {old_url} → {new_url}")
-                    
-                    # Update our tracking maps so we don't stage delete/insert for this event
-                    db_by_unique_key[event['unique_key']] = db_event
-                    scraped_keys.add(event['unique_key'])
-        
-        # STEP 2: Find events to INSERT (new unique keys not in DB)
-        for event in scraped_events_in_range:
-            if event['unique_key'] not in db_by_unique_key:
-                # Also check identity key - if identity exists, it was a URL update (handled above)
-                if event['identity_key'] not in db_by_identity_key:
-                    if self.stage_insert(event, run_id):
-                        staged_inserts += 1
-        
-        # STEP 3: Find events to DELETE (DB events not in scraped data)
-        for unique_key, db_event in db_by_unique_key.items():
-            identity_key = self.generate_identity_key(db_event)
-            # Only stage delete if neither unique_key nor identity_key is in scraped data
-            if unique_key not in scraped_keys and identity_key not in scraped_identity_keys:
-                if self.stage_delete(db_event, run_id):
-                    staged_deletes += 1
         
         if url_updates > 0:
             print(f"  → Updated {url_updates} event URLs")
