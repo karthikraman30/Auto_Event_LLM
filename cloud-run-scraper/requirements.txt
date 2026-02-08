@@ -1,0 +1,26 @@
+# Flask for HTTP server
+flask>=3.0.0
+gunicorn>=21.0.0
+
+# Scrapy and dependencies
+scrapy>=2.11.0
+scrapy-playwright>=0.0.40
+playwright>=1.40.0
+
+# Database
+supabase>=2.0.0
+
+# Utilities
+python-dotenv>=1.0.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+apscheduler>=3.10.0
+
+# Other dependencies from main project
+lxml>=5.0.0
+beautifulsoup4>=4.12.0
+cloudscraper>=1.2.71
+requests>=2.31.0
+
+# Gemini (optional - for LLM extraction)
+google-generativeai>=0.3.0

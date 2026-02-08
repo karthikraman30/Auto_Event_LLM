@@ -1,0 +1,52 @@
+# Cloud Build configuration for deploying to Cloud Run
+# 
+# Usage:
+#   gcloud builds submit --config cloudbuild.yaml
+#
+# Or deploy directly:
+#   gcloud run deploy event-scraper --source . --region=us-central1
+
+steps:
+  # Build the container image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-f', 'cloud-run-scraper/Dockerfile', '-t', 'gcr.io/$PROJECT_ID/event-scraper', '.']
+
+  # Push the container image to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/event-scraper']
+
+  # Deploy container image to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'event-scraper'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/event-scraper'
+      - '--region'
+      - 'us-central1'
+      - '--platform'
+      - 'managed'
+      - '--memory'
+      - '4Gi'
+      - '--cpu'
+      - '2'
+      - '--timeout'
+      - '3600s'  # 1 hour timeout for long-running scrapes
+      - '--concurrency'
+      - '1'  # Only one request at a time (scraper)
+      - '--min-instances'
+      - '0'  # Scale to zero when not in use
+      - '--max-instances'
+      - '1'  # Only one instance (no parallel runs)
+      - '--set-env-vars'
+      - 'SUPABASE_URL=${_SUPABASE_URL},SUPABASE_KEY=${_SUPABASE_KEY}'
+
+images:
+  - 'gcr.io/$PROJECT_ID/event-scraper'
+
+# Substitutions (override these when running the build)
+substitutions:
+  _SUPABASE_URL: 'your_supabase_url'
+  _SUPABASE_KEY: 'your_supabase_key'

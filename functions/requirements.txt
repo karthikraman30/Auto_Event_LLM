@@ -1,0 +1,9 @@
+# Firebase Functions requirements
+firebase-functions>=0.1.0
+firebase-admin>=6.0.0
+
+# Database
+supabase>=2.0.0
+
+# Common utilities
+python-dotenv>=1.0.0

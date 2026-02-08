@@ -6,6 +6,7 @@ import math
 import subprocess
 import re
 import json
+import requests
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -14,6 +15,36 @@ from apscheduler.triggers.date import DateTrigger
 sys.path.append(os.path.join(os.getcwd(), "event_category"))
 from event_category.utils.db_manager import DatabaseManager
 from seed_selectors import ensure_selectors_seeded
+
+# --- CLOUD RUN CONFIGURATION ---
+CLOUD_RUN_URL = "https://event-scraper-563240550469.us-central1.run.app"
+
+def trigger_cloud_run_scraper(mode: str, timeout: int = 600) -> dict:
+    """Trigger Cloud Run scraper via HTTP POST.
+    
+    Args:
+        mode: 'baseline' or 'incremental'  
+        timeout: Request timeout in seconds (default 10 min)
+        
+    Returns:
+        dict with 'success', 'message', and optionally 'data'
+    """
+    try:
+        response = requests.post(
+            CLOUD_RUN_URL,
+            json={"mode": mode},
+            headers={"Content-Type": "application/json"},
+            timeout=timeout
+        )
+        
+        if response.status_code == 200:
+            return {"success": True, "message": "Scraper completed", "data": response.json()}
+        else:
+            return {"success": False, "message": f"Error {response.status_code}: {response.text[:500]}"}
+    except requests.exceptions.Timeout:
+        return {"success": False, "message": "Request timed out - scraper may still be running in background"}
+    except requests.exceptions.RequestException as e:
+        return {"success": False, "message": f"Request failed: {str(e)}"}
 
 # --- AUTO-SEED SELECTORS ON STARTUP ---
 # This ensures deployed apps have default selectors even though selectors.db is gitignored
@@ -872,38 +903,21 @@ with tabs[1]:
     
     with baseline_col2:
         if st.button("🚀 Run Baseline Now", use_container_width=True):
-            with st.spinner("Running Monthly Baseline scraper..."):
+            with st.spinner("🌐 Triggering Cloud Run baseline scraper..."):
                 try:
-                    env = get_subprocess_env()
-                    # Build command with optional custom start date
-                    cmd = [VENV_PYTHON, RUN_PARALLEL_FILE, "--run-type", "baseline"]
-                    if current_baseline_date:
-                        cmd.extend(["--start-date", current_baseline_date])
-                    result = subprocess.run(
-                        cmd,
-                        cwd=os.getcwd(),
-                        capture_output=True,
-                        text=True,
-                        timeout=2700,
-                        env=env
-                    )
+                    result = trigger_cloud_run_scraper("baseline", timeout=900)  # 15 min timeout
                     
-                    if result.returncode == 0:
-                        match = re.search(r'Scraping complete: (\d+) events, (\d+) failures', result.stdout)
-                        if match:
-                            events_count = int(match.group(1))
-                            failures = int(match.group(2))
-                            status = "Warn" if failures > 0 else "OK"
-                            db.add_log("Baseline", status, events_count, failures, None)
-                        st.success(f"✅ Baseline scrape completed! Events directly added to database.")
+                    if result["success"]:
+                        data = result.get("data", {})
+                        events_count = data.get("events_scraped", 0)
+                        failures = data.get("failures", 0)
+                        status = "Warn" if failures > 0 else "OK"
+                        db.add_log("Baseline", status, events_count, failures, None)
+                        st.success(f"✅ Baseline scrape completed! {events_count} events added to database.")
                         st.rerun()
                     else:
-                        db.add_log("Baseline", "Error", 0, 1, [result.stderr[:500] if result.stderr else "Unknown error"])
-                        st.error(f"❌ Baseline scrape failed")
-                        st.text_area("Error", result.stderr, height=150)
-                except subprocess.TimeoutExpired:
-                    db.add_log("Baseline", "Error", 0, 1, ["Timeout after 30 minutes"])
-                    st.error("❌ Baseline scrape timed out after 45 minutes")
+                        db.add_log("Baseline", "Error", 0, 1, [result["message"][:500]])
+                        st.error(f"❌ Baseline scrape failed: {result['message']}")
                 except Exception as e:
                     db.add_log("Baseline", "Error", 0, 1, [str(e)])
                     st.error(f"❌ Baseline scrape failed: {str(e)}")
@@ -986,57 +1000,28 @@ with tabs[1]:
     
     with incremental_col2:
         if st.button("🔄 Run Incremental Now", use_container_width=True):
-            with st.spinner("Running Incremental scraper (next 5-6 days)..."):
+            with st.spinner("🌐 Triggering Cloud Run incremental scraper..."):
                 try:
-                    print("[INCREMENTAL] Starting incremental scraper...")
-                    print(f"[INCREMENTAL] Using Python: {VENV_PYTHON}")
-                    print(f"[INCREMENTAL] CWD: {os.getcwd()}")
-                    env = get_subprocess_env()
-                    print("[INCREMENTAL] Environment prepared, launching subprocess...")
-                    import sys
-                    sys.stdout.flush()  # Force flush to show in logs immediately
+                    result = trigger_cloud_run_scraper("incremental", timeout=600)  # 10 min timeout
                     
-                    result = subprocess.run(
-                        [VENV_PYTHON, RUN_PARALLEL_FILE, "--run-type", "incremental"],
-                        cwd=os.getcwd(),
-                        capture_output=True,
-                        text=True,
-                        timeout=2700,
-                        env=env
-                    )
-                    
-                    print(f"[INCREMENTAL] Subprocess completed with return code: {result.returncode}")
-                    print(f"[INCREMENTAL] STDOUT: {result.stdout[-2000:] if result.stdout else 'empty'}")
-                    print(f"[INCREMENTAL] STDERR: {result.stderr[-1000:] if result.stderr else 'empty'}")
-                    sys.stdout.flush()
-                    
-                    if result.returncode == 0:
-                        # Parse staged changes from output
-                        match_staged = re.search(r'Staged (\d+) inserts, (\d+) deletes', result.stdout)
-                        if match_staged:
-                            staged_ins = int(match_staged.group(1))
-                            staged_del = int(match_staged.group(2))
-                            st.success(f"✅ Incremental scrape completed!")
-                            st.info(f"📋 Staged **{staged_ins}** inserts, **{staged_del}** deletes for review")
-                            if staged_ins > 0 or staged_del > 0:
-                                st.warning("👉 Go to the **Updates** tab to review and apply changes")
-                        else:
-                            st.success("✅ Incremental scrape completed! Check Updates tab for changes.")
+                    if result["success"]:
+                        data = result.get("data", {})
+                        events_count = data.get("events_scraped", 0)
+                        failures = data.get("failures", 0)
+                        staged_ins = data.get("staged_inserts", 0)
+                        staged_del = data.get("staged_deletes", 0)
                         
-                        match = re.search(r'Scraping complete: (\d+) events, (\d+) failures', result.stdout)
-                        if match:
-                            events_count = int(match.group(1))
-                            failures = int(match.group(2))
-                            status = "Warn" if failures > 0 else "OK"
-                            db.add_log("Incremental", status, events_count, failures, None)
+                        status = "Warn" if failures > 0 else "OK"
+                        db.add_log("Incremental", status, events_count, failures, None)
+                        
+                        st.success(f"✅ Incremental scrape completed!")
+                        if staged_ins > 0 or staged_del > 0:
+                            st.info(f"📋 Staged **{staged_ins}** inserts, **{staged_del}** deletes for review")
+                            st.warning("👉 Go to the **Updates** tab to review and apply changes")
                         st.rerun()
                     else:
-                        db.add_log("Incremental", "Error", 0, 1, [result.stderr[:500] if result.stderr else "Unknown error"])
-                        st.error(f"❌ Incremental scrape failed")
-                        st.text_area("Error", result.stderr, height=150)
-                except subprocess.TimeoutExpired:
-                    db.add_log("Incremental", "Error", 0, 1, ["Timeout after 30 minutes"])
-                    st.error("❌ Incremental scrape timed out after 45 minutes")
+                        db.add_log("Incremental", "Error", 0, 1, [result["message"][:500]])
+                        st.error(f"❌ Incremental scrape failed: {result['message']}")
                 except Exception as e:
                     db.add_log("Incremental", "Error", 0, 1, [str(e)])
                     st.error(f"❌ Incremental scrape failed: {str(e)}")

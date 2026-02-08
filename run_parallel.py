@@ -353,16 +353,34 @@ def main(days=30, run_type='baseline', start_date=None):
         url_names[url_info['url']] = url_info['name']
     
     # Pass environment explicitly to each worker
-    with ProcessPoolExecutor(max_workers=2) as executor:
+    # Detect environment: Cloud Run has PORT env var set, Streamlit may have STREAMLIT_SERVER_PORT
+    is_cloud_run = os.environ.get('PORT') and not os.environ.get('STREAMLIT_SERVER_PORT')
+    
+    if is_cloud_run:
+        # Cloud Run has 2GB RAM - use 2 workers to stay within limits
+        max_workers = 2
+    else:
+        # Streamlit Cloud has ~1GB RAM - use sequential to prevent OOM
+        max_workers = 1
+    
+    print(f"[DEBUG] Using max_workers={max_workers} (Cloud Run: {is_cloud_run})")
+    
+    import gc
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
         # Create args tuples with (url, index, env_dict, days)
         args_list = [(url, i, PARENT_ENV, days) for i, url in enumerate(urls)]
         futures = {executor.submit(run_spider, args): args[0] for args in args_list}
         
-        for future in as_completed(futures):
+        for idx, future in enumerate(as_completed(futures)):
             result = future.result()
             results.append(result)
+            print(f"[PROGRESS] Completed {idx+1}/{len(urls)}: {result['url']}")
             print(f"[DEBUG] main: Got result for {result['url']}")
             print(f"[DEBUG] main: Success: {result['success']}")
+            
+            # Force garbage collection after each URL to prevent OOM on Streamlit Cloud
+            gc.collect()
+            
             if result['success']:
                 print(f"[DEBUG] main: Output file: {result['path']}")
                 if result['path'] and os.path.exists(result['path']):
