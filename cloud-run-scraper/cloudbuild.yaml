@@ -29,7 +29,7 @@ steps:
       - '--platform'
       - 'managed'
       - '--memory'
-      - '4Gi'
+      - '8Gi'
       - '--cpu'
       - '2'
       - '--timeout'

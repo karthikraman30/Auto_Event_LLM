@@ -905,7 +905,7 @@ with tabs[1]:
         if st.button("🚀 Run Baseline Now", use_container_width=True):
             with st.spinner("🌐 Triggering Cloud Run baseline scraper..."):
                 try:
-                    result = trigger_cloud_run_scraper("baseline", timeout=900)  # 15 min timeout
+                    result = trigger_cloud_run_scraper("baseline", timeout=1800)  # 30 min timeout
                     
                     if result["success"]:
                         data = result.get("data", {})

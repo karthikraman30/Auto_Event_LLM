@@ -357,7 +357,7 @@ def main(days=30, run_type='baseline', start_date=None):
     is_cloud_run = os.environ.get('PORT') and not os.environ.get('STREAMLIT_SERVER_PORT')
     
     if is_cloud_run:
-        # Cloud Run has 2GB RAM - use 2 workers to stay within limits
+        # Cloud Run with 8GB RAM - can handle 2 parallel Playwright workers
         max_workers = 2
     else:
         # Streamlit Cloud has ~1GB RAM - use sequential to prevent OOM
