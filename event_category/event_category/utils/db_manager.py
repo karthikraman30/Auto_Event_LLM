@@ -117,7 +117,8 @@ class DatabaseManager:
 
     def get_all_events(self):
         """Get all events ordered by date."""
-        response = self.supabase.table('events').select('*').order('date_iso').execute()
+        # Supabase default limit is 1000, fetch more for export
+        response = self.supabase.table('events').select('*').order('date_iso').limit(10000).execute()
         return response.data or []
 
     def get_events_filtered(self, search="", venue="All Venues", date_range="All Time", 
