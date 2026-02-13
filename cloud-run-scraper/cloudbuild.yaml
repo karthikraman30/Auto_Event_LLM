@@ -40,13 +40,8 @@ steps:
       - '0'  # Scale to zero when not in use
       - '--max-instances'
       - '1'  # Only one instance (no parallel runs)
-      - '--set-env-vars'
-      - 'SUPABASE_URL=${_SUPABASE_URL},SUPABASE_KEY=${_SUPABASE_KEY}'
+      - '--set-secrets'
+      - 'SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_KEY=SUPABASE_KEY:latest'
 
 images:
   - 'gcr.io/$PROJECT_ID/event-scraper'
-
-# Substitutions (override these when running the build)
-substitutions:
-  _SUPABASE_URL: 'your_supabase_url'
-  _SUPABASE_KEY: 'your_supabase_key'
