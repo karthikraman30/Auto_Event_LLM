@@ -258,6 +258,54 @@ def collect_scraped_events(results):
     
     return all_events
 
+
+def get_event_count_from_file(file_path):
+    """Count events in a scraped JSON file."""
+    if not file_path or not os.path.exists(file_path):
+        return 0
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        events = json.loads(content) if content.strip() else []
+        return len(events)
+    except:
+        return 0
+
+
+def retry_failed_urls(failed_urls, days, url_names, db, run_type):
+    """Retry failed URLs sequentially (one at a time) to avoid resource contention."""
+    import gc
+    retry_results = []
+    
+    for url in failed_urls:
+        url_name = url_names.get(url, url)
+        print(f"[RETRY] Retrying {url_name}...")
+        
+        # Use a unique index for retry files
+        retry_index = abs(hash(url)) % 10000
+        result = run_spider((url, f"retry_{retry_index}", PARENT_ENV, days))
+        
+        if result['success']:
+            event_count = get_event_count_from_file(result['path'])
+            print(f"[RETRY] ✅ {url_name} succeeded with {event_count} events")
+            db.resolve_failure(url)
+        else:
+            print(f"[RETRY] ❌ {url_name} still failed: {result['error']}")
+            # Log failure again
+            db.log_scrape_failure(
+                url=url,
+                url_name=url_name,
+                error_message=f"Retry failed: {result['error']}",
+                error_type='RETRY_FAILED',
+                run_type=run_type
+            )
+        
+        retry_results.append(result)
+        gc.collect()
+    
+    return retry_results
+
+
 def main(days=30, run_type='baseline', start_date=None):
     """
     Run parallel scraping for all enabled URLs.
@@ -430,6 +478,41 @@ def main(days=30, run_type='baseline', start_date=None):
                 )
                 
                 warnings.append(f"{url_name}: {error_msg}")
+    
+    # === RETRY LOGIC: Check for failed URLs and retry them ===
+    failed_urls = []
+    for result in results:
+        if not result['success']:
+            failed_urls.append(result['url'])
+        elif result['path']:
+            # Also retry URLs that produced 0 events (silent failures)
+            event_count = get_event_count_from_file(result['path'])
+            if event_count == 0:
+                print(f"[WARNING] {result['url']} succeeded but has 0 events - adding to retry")
+                failed_urls.append(result['url'])
+    
+    if failed_urls:
+        print(f"\n[RETRY] {len(failed_urls)} URL(s) need retry: {[url_names.get(u, u) for u in failed_urls]}")
+        retry_results = retry_failed_urls(failed_urls, days, url_names, db, run_type)
+        
+        # Update results: replace failed results with retry results
+        for retry_result in retry_results:
+            # Find and replace the original result
+            for i, orig_result in enumerate(results):
+                if orig_result['url'] == retry_result['url']:
+                    if retry_result['success']:
+                        results[i] = retry_result
+                        # Decrement failure count if retry succeeded
+                        if not orig_result['success']:
+                            failures -= 1
+                    break
+        
+        # Update warnings list
+        still_failed = [r for r in retry_results if not r['success']]
+        if still_failed:
+            print(f"[RETRY] ⚠️ {len(still_failed)} URL(s) still failed after retry")
+    else:
+        print(f"\n[OK] All {len(urls)} URLs completed successfully")
     
     # Process results based on run type
     staged_inserts = 0
