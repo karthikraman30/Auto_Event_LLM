@@ -29,9 +29,9 @@ steps:
       - '--platform'
       - 'managed'
       - '--memory'
-      - '8Gi'
+      - '16Gi'
       - '--cpu'
-      - '2'
+      - '4'
       - '--timeout'
       - '3600s'  # 1 hour timeout for long-running scrapes
       - '--concurrency'
