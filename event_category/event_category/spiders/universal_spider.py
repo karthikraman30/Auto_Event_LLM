@@ -1187,29 +1187,25 @@ class UnifiedEventSpider(scrapy.Spider):
     async def handle_generic(self, page, response):
         # ============================================================
         # GRAPHQL FAST PATH: Skip browser automation for Stockholm Library
-        # Note: GraphQL only works for /evenemang (isSchoolEvent=false)
-        # The /forskolor endpoint (isSchoolEvent=true) has limited schema
-        # (no dates, no URLs) so it still needs button-clicking
+        # Works for both /evenemang (isSchoolEvent=false) and /forskolor (isSchoolEvent=true)
         # ============================================================
         if USE_GRAPHQL_FOR_STOCKHOLM and "biblioteket.stockholm.se" in response.url:
             is_school_event = "forskolor" in response.url
-            # Only use GraphQL for /evenemang - school events API lacks date/URL fields
-            if not is_school_event:
-                self.logger.info(f"Stockholm GraphQL: Using direct API for {response.url}")
-                await page.close()  # Don't need browser for GraphQL
-                graphql_yielded = 0
-                try:
-                    async for item in self.handle_stockholm_library_graphql(response, is_school_event=False):
-                        graphql_yielded += 1
-                        yield item
-                    if graphql_yielded > 0:
-                        self.logger.info(f"Stockholm GraphQL: Successfully yielded {graphql_yielded} events")
-                        return
-                except Exception as e:
-                    self.logger.warning(f"Stockholm GraphQL: Failed ({e}), falling back to button-clicking")
-                    # Re-fetch page for fallback - need to reconstruct the request
-                    # For now, just return empty and log the error
+            self.logger.info(f"Stockholm GraphQL: Using direct API for {response.url} (isSchoolEvent={is_school_event})")
+            await page.close()  # Don't need browser for GraphQL
+            graphql_yielded = 0
+            try:
+                async for item in self.handle_stockholm_library_graphql(response, is_school_event=is_school_event):
+                    graphql_yielded += 1
+                    yield item
+                if graphql_yielded > 0:
+                    self.logger.info(f"Stockholm GraphQL: Successfully yielded {graphql_yielded} events")
                     return
+            except Exception as e:
+                self.logger.warning(f"Stockholm GraphQL: Failed ({e}), falling back to button-clicking")
+                # Re-fetch page for fallback - need to reconstruct the request
+                # For now, just return empty and log the error
+                return
         
         # ============================================================
         # TRADITIONAL PATH: Scroll and click "load more" buttons
@@ -1560,9 +1556,13 @@ class UnifiedEventSpider(scrapy.Spider):
                 except ValueError:
                     pass  # If date parsing fails, include the event
             
-            # Build event URL from slug
+            # Build event URL from slug - use correct path for school vs regular events
             slug = event.get('eventSlugId', '')
-            event_url = f"https://biblioteket.stockholm.se/evenemang/{slug}" if slug else ''
+            if slug:
+                url_path = 'forskolor' if is_school_event else 'evenemang'
+                event_url = f"https://biblioteket.stockholm.se/{url_path}/{slug}"
+            else:
+                event_url = ''
             
             # Extract time
             start_time = date_time.get('startTime', '')
