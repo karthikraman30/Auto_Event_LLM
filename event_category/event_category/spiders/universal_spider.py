@@ -1187,10 +1187,13 @@ class UnifiedEventSpider(scrapy.Spider):
     async def handle_generic(self, page, response):
         # ============================================================
         # GRAPHQL FAST PATH: Skip browser automation for Stockholm Library
+        # Note: GraphQL only works for /evenemang (isSchoolEvent=false)
+        # The /forskolor endpoint (isSchoolEvent=true) has limited schema
+        # (no dates, no URLs) so it still needs button-clicking
         # ============================================================
         if USE_GRAPHQL_FOR_STOCKHOLM and "biblioteket.stockholm.se" in response.url:
             is_school_event = "forskolor" in response.url
-            # Only use GraphQL for /evenemang, keep button-clicking for /forskolor for now
+            # Only use GraphQL for /evenemang - school events API lacks date/URL fields
             if not is_school_event:
                 self.logger.info(f"Stockholm GraphQL: Using direct API for {response.url}")
                 await page.close()  # Don't need browser for GraphQL
