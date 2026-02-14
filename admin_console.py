@@ -564,9 +564,22 @@ with tabs[0]:
                     st.text_area("Final Error", final_error, height=200)
     
     with action_col3:
-        events = db.get_all_events()
-        if events:
-            df_export = pd.DataFrame(events)
+        # Fetch ALL events with pagination to avoid Supabase 1000 row limit
+        all_events = []
+        batch_size = 1000
+        offset = 0
+        while True:
+            response = db.supabase.table('events').select('*').order('date_iso').range(offset, offset + batch_size - 1).execute()
+            batch = response.data or []
+            if not batch:
+                break
+            all_events.extend(batch)
+            if len(batch) < batch_size:
+                break
+            offset += batch_size
+        
+        if all_events:
+            df_export = pd.DataFrame(all_events)
             
             # Use target_group_normalized values in the target_group column
             if 'target_group_normalized' in df_export.columns:
@@ -578,8 +591,13 @@ with tabs[0]:
                 'deleted_by_run_type', 'deleted_window_days', 'missing_count'
             ]
             df_export = df_export.drop(columns=[col for col in columns_to_exclude if col in df_export.columns])
-            csv = df_export.to_csv(index=False).encode('utf-8')
-            st.download_button("📁 Export Excel", csv, "events.csv", "text/csv", use_container_width=True)
+            
+            # Export as Excel file
+            from io import BytesIO
+            output = BytesIO()
+            df_export.to_excel(output, index=False, engine='openpyxl')
+            excel_data = output.getvalue()
+            st.download_button("📁 Export Excel", excel_data, "events.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
         else:
             st.button("📁 Export Excel", disabled=True, use_container_width=True)
     
