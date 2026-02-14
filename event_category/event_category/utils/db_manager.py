@@ -868,28 +868,44 @@ class DatabaseManager:
     # ==================== INCREMENTAL COMPARISON ====================
     
     def compare_and_stage_changes(self, scraped_events, start_date, end_date, run_id=None):
-        """Compare scraped events against DB and stage changes."""
-        # Extract unique domains from scraped events
-        scraped_domains = set()
+        """Compare scraped events against DB and stage changes.
+        
+        Uses URL path patterns (not just domains) to ensure we only compare
+        events from the same source. This prevents false deletes when a domain
+        has multiple URL patterns (e.g., /evenemang vs /forskolor).
+        """
+        # Extract unique URL patterns (domain + first path segment) from scraped events
+        scraped_url_patterns = set()
         for event in scraped_events:
             url = event.get('event_url', '')
             if url:
                 try:
-                    domain = urlparse(url).netloc
-                    scraped_domains.add(domain)
+                    parsed = urlparse(url)
+                    domain = parsed.netloc
+                    # Extract the first path segment to identify the event source
+                    # e.g., "/evenemang/event-123" -> "/evenemang"
+                    # e.g., "/forskolor/preschool-event" -> "/forskolor"
+                    path_parts = parsed.path.strip('/').split('/')
+                    if path_parts and path_parts[0]:
+                        first_segment = '/' + path_parts[0]
+                        url_pattern = f"{domain}{first_segment}"
+                        scraped_url_patterns.add(url_pattern)
                 except:
                     pass
         
-        if not scraped_domains:
+        if not scraped_url_patterns:
             return {"staged_inserts": 0, "staged_deletes": 0}
         
-        # Get existing events in date range filtered by domains
+        print(f"[DEBUG] URL patterns found in scraped events: {scraped_url_patterns}")
+        
+        # Get existing events in date range filtered by URL patterns (not just domains)
+        # This ensures we only compare events from the same source
         all_db_events = []
-        for domain in scraped_domains:
+        for url_pattern in scraped_url_patterns:
             response = self.supabase.table('events').select(
                 'id, event_name, date_iso, event_url, location, unique_key, time'
             ).gte('date_iso', start_date).lte('date_iso', end_date).ilike(
-                'event_url', f'%{domain}%'
+                'event_url', f'%{url_pattern}%'
             ).execute()
             all_db_events.extend(response.data or [])
         
