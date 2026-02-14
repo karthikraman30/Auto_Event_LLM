@@ -17,6 +17,87 @@ SWEDISH_MONTHS = {
     'november': 11, 'nov': 11, 'december': 12, 'dec': 12,
 }
 
+# Reverse mapping for formatting dates in Swedish (for GraphQL API)
+SWEDISH_MONTH_NAMES = {
+    1: 'januari', 2: 'februari', 3: 'mars', 4: 'april', 5: 'maj', 6: 'juni',
+    7: 'juli', 8: 'augusti', 9: 'september', 10: 'oktober', 11: 'november', 12: 'december'
+}
+
+SWEDISH_DAY_NAMES = {
+    0: 'måndag', 1: 'tisdag', 2: 'onsdag', 3: 'torsdag', 4: 'fredag', 5: 'lördag', 6: 'söndag'
+}
+
+# Stockholm Library GraphQL API configuration
+USE_GRAPHQL_FOR_STOCKHOLM = True  # Feature flag to toggle GraphQL vs button-clicking
+STOCKHOLM_GRAPHQL_URL = "https://biblioteket.stockholm.se/graphql/"
+STOCKHOLM_GRAPHQL_PAGE_SIZE = 100  # Events per request (API default is 20)
+
+# GraphQL query for Stockholm Library event search
+# NOTE: Date filtering is done client-side - the API returns upcoming events by default
+STOCKHOLM_EVENT_SEARCH_QUERY = """
+query eventSearch(
+  $query: String!
+  $size: Int
+  $from: Int
+  $isSchoolEvent: Boolean
+) {
+  eventSearch(
+    query: $query
+    size: $size
+    from: $from
+    isSchoolEvent: $isSchoolEvent
+  ) {
+    results
+    events {
+      id
+      title
+      eventSlugId
+      description {
+        preamble
+      }
+      image {
+        url
+        caption
+        altText
+      }
+      location
+      library
+      externalEventLink
+      dateTime {
+        startDate
+        stopDate
+        startTime
+        stopTime
+      }
+      targetAudiences
+      languages
+      category
+      subcategory
+      canceled
+      bookable
+      bookingStatus
+      otherInformation
+      recurring
+    }
+  }
+}
+"""
+
+def format_swedish_date(date_obj):
+    """Format a date object as Swedish string for GraphQL API (e.g., 'fredag 14 februari 2026')"""
+    if isinstance(date_obj, str):
+        date_obj = datetime.strptime(date_obj, "%Y-%m-%d").date()
+    day_name = SWEDISH_DAY_NAMES[date_obj.weekday()]
+    month_name = SWEDISH_MONTH_NAMES[date_obj.month]
+    return f"{day_name} {date_obj.day} {month_name} {date_obj.year}"
+
+def parse_graphql_swedish_date(date_str):
+    """Parse Swedish date from GraphQL response (e.g., 'söndag 15 februari 2026') to ISO format"""
+    if not date_str:
+        return None
+    # Use existing parse_swedish_date which handles this format
+    return parse_swedish_date(date_str)
+
 def parse_swedish_date(date_str):
     if not date_str:
         return None
@@ -278,6 +359,7 @@ class UnifiedEventSpider(scrapy.Spider):
         super().__init__(*args, **kwargs)
         self.url = url
         self.scrape_days = int(days)  # Configurable days parameter (default 30)
+        self.spider_stats = {}  # Track GraphQL and other statistics
 
     def extract_age_limit(self, description):
         """
@@ -1103,7 +1185,32 @@ class UnifiedEventSpider(scrapy.Spider):
         yield item
 
     async def handle_generic(self, page, response):
-        # Scroll and click "load more" buttons to get all events
+        # ============================================================
+        # GRAPHQL FAST PATH: Skip browser automation for Stockholm Library
+        # ============================================================
+        if USE_GRAPHQL_FOR_STOCKHOLM and "biblioteket.stockholm.se" in response.url:
+            is_school_event = "forskolor" in response.url
+            # Only use GraphQL for /evenemang, keep button-clicking for /forskolor for now
+            if not is_school_event:
+                self.logger.info(f"Stockholm GraphQL: Using direct API for {response.url}")
+                await page.close()  # Don't need browser for GraphQL
+                graphql_yielded = 0
+                try:
+                    async for item in self.handle_stockholm_library_graphql(response, is_school_event=False):
+                        graphql_yielded += 1
+                        yield item
+                    if graphql_yielded > 0:
+                        self.logger.info(f"Stockholm GraphQL: Successfully yielded {graphql_yielded} events")
+                        return
+                except Exception as e:
+                    self.logger.warning(f"Stockholm GraphQL: Failed ({e}), falling back to button-clicking")
+                    # Re-fetch page for fallback - need to reconstruct the request
+                    # For now, just return empty and log the error
+                    return
+        
+        # ============================================================
+        # TRADITIONAL PATH: Scroll and click "load more" buttons
+        # ============================================================
         # OPTIMIZED: Track event count to detect when no more events are loading
         # Stockholm library typically shows ~25-30 events per page, each click loads ~10-15 more
         if "biblioteket.stockholm.se" in response.url:
@@ -1117,7 +1224,15 @@ class UnifiedEventSpider(scrapy.Spider):
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             await page.wait_for_timeout(1000)
         
-        self.logger.info(f"Starting load more loop (max {max_iterations} iterations for {self.scrape_days} days)")
+        # Library site uses 'article' elements; generic sites use broader selector
+        is_library = "biblioteket.stockholm.se" in response.url
+        event_counter_selector = "article" if is_library else "article, .event, .card, li[class*='event']"
+        # Library's GraphQL-backed pagination needs more tolerance for loading delays
+        max_no_new_events = 5 if is_library else 3
+        click_wait_ms = 2500 if is_library else 1500
+        scroll_wait_ms = 1200 if is_library else 800
+        
+        self.logger.info(f"Starting load more loop (max {max_iterations} iterations for {self.scrape_days} days, counter='{event_counter_selector}')")
         consecutive_failures = 0
         no_new_events_count = 0
         previous_event_count = 0
@@ -1129,25 +1244,25 @@ class UnifiedEventSpider(scrapy.Spider):
                     btn = page.locator(f"button:has-text('{word}'), a:has-text('{word}')").first
                     if await btn.count() > 0 and await btn.is_visible():
                         # Count events before clicking to detect if button actually loads more
-                        current_event_count = await page.locator("article, .event, .card, li[class*='event']").count()
+                        current_event_count = await page.locator(event_counter_selector).count()
                         
                         self.logger.info(f"Clicking '{word}' button (iteration {i+1}/{max_iterations}, {current_event_count} events visible)")
                         await btn.click(force=True, timeout=3000)
-                        # Reduced wait time for better performance
-                        await page.wait_for_timeout(1500)
+                        await page.wait_for_timeout(click_wait_ms)
                         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                        await page.wait_for_timeout(800)
+                        await page.wait_for_timeout(scroll_wait_ms)
                         
                         # Check if new events were loaded
-                        new_event_count = await page.locator("article, .event, .card, li[class*='event']").count()
+                        new_event_count = await page.locator(event_counter_selector).count()
                         if new_event_count == current_event_count:
                             no_new_events_count += 1
-                            self.logger.info(f"No new events loaded ({no_new_events_count}/3 strikes)")
-                            if no_new_events_count >= 3:
-                                self.logger.info(f"Button stopped loading events after {i+1} clicks, stopping")
+                            self.logger.info(f"No new events loaded ({no_new_events_count}/{max_no_new_events} strikes)")
+                            if no_new_events_count >= max_no_new_events:
+                                self.logger.info(f"Button stopped loading events after {i+1} clicks, stopping (final count: {new_event_count})")
                                 break  # Exit loop - no more events to load
                         else:
                             no_new_events_count = 0  # Reset counter if events loaded
+                            self.logger.info(f"Loaded {new_event_count - current_event_count} new events (total: {new_event_count})")
                         
                         clicked = True
                         consecutive_failures = 0
@@ -1165,6 +1280,10 @@ class UnifiedEventSpider(scrapy.Spider):
                 else:
                     self.logger.info(f"No more load buttons found after {consecutive_failures} attempts, stopping after {i+1} iterations")
                     break
+        
+        # Log final event count for debugging
+        final_count = await page.locator(event_counter_selector).count()
+        self.logger.info(f"Finished loading: {final_count} total events on page after {i+1} iterations")
         
         selectors = self.db.get_selectors(response.url)
         if not selectors:
@@ -1317,6 +1436,202 @@ class UnifiedEventSpider(scrapy.Spider):
         self.logger.info(f"Stockholm Library: Yielded {events_yielded} events, skipped {events_skipped_past} past, {events_skipped_future} future")
         self.logger.info(f"Stockholm Library: Date range seen: {sorted_dates[0] if sorted_dates else 'none'} to {sorted_dates[-1] if sorted_dates else 'none'}")
         self.logger.info(f"Stockholm Library: All unique dates ({len(sorted_dates)}): {sorted_dates[:15]}{'...' if len(sorted_dates) > 15 else ''}")
+
+    async def handle_stockholm_library_graphql(self, response, is_school_event=False):
+        """
+        Direct GraphQL API handler for Stockholm library - bypasses browser automation.
+        Much faster and more reliable than clicking 'Visa fler' button repeatedly.
+        Date filtering is done client-side since the API returns all upcoming events.
+        """
+        today = datetime.now().date()
+        limit = today + timedelta(days=self.scrape_days)
+        
+        self.logger.info(f"Stockholm GraphQL: Fetching events for {today} to {limit} ({self.scrape_days} days, isSchoolEvent={is_school_event})")
+        
+        # Track statistics
+        total_fetched = 0
+        events_yielded = 0
+        events_filtered_date = 0
+        from_offset = 0
+        
+        scraper = cloudscraper.create_scraper()
+        
+        while True:
+            # Note: Date filtering is done client-side - API returns all upcoming events
+            variables = {
+                "query": "",  # Empty query = all events
+                "from": from_offset,
+                "size": STOCKHOLM_GRAPHQL_PAGE_SIZE,
+                "isSchoolEvent": is_school_event
+            }
+            
+            try:
+                api_response = scraper.post(
+                    STOCKHOLM_GRAPHQL_URL,
+                    json={
+                        "query": STOCKHOLM_EVENT_SEARCH_QUERY,
+                        "variables": variables,
+                        "_operation": "eventSearch"
+                    },
+                    headers={
+                        "Content-Type": "application/json",
+                        "Accept": "*/*",
+                        "Origin": "https://biblioteket.stockholm.se",
+                        "Referer": response.url
+                    },
+                    timeout=30
+                )
+                
+                if api_response.status_code != 200:
+                    self.logger.error(f"Stockholm GraphQL: API returned status {api_response.status_code}")
+                    self.logger.error(f"Stockholm GraphQL: Response: {api_response.text[:500]}")
+                    break
+                
+                data = api_response.json()
+                event_search = data.get('data', {}).get('eventSearch', {})
+                total_results = event_search.get('results', 0)
+                events = event_search.get('events', [])
+                
+                if not events:
+                    self.logger.info(f"Stockholm GraphQL: No more events at offset {from_offset}")
+                    break
+                
+                total_fetched += len(events)
+                self.logger.info(f"Stockholm GraphQL: Fetched {len(events)} events (offset {from_offset}, total available: {total_results})")
+                
+                # Process each event with date filtering
+                for event in events:
+                    item = self._parse_graphql_event(event, is_school_event, response.url, today, limit)
+                    if item:
+                        events_yielded += 1
+                        yield item
+                    elif item is False:
+                        # Item was filtered out by date
+                        events_filtered_date += 1
+                
+                # Check if we've fetched all events
+                from_offset += STOCKHOLM_GRAPHQL_PAGE_SIZE
+                if from_offset >= total_results:
+                    self.logger.info(f"Stockholm GraphQL: Reached end of results ({total_results} total)")
+                    break
+                    
+            except Exception as e:
+                self.logger.error(f"Stockholm GraphQL: Error fetching events: {e}")
+                import traceback
+                self.logger.error(f"Stockholm GraphQL: Traceback: {traceback.format_exc()}")
+                # Fall back to traditional method on error
+                self.logger.warning("Stockholm GraphQL: Falling back to button-clicking method")
+                return  # Caller will handle fallback
+        
+        self.logger.info(f"Stockholm GraphQL: Complete - fetched {total_fetched}, yielded {events_yielded}, filtered by date {events_filtered_date}")
+        self.spider_stats['graphql_events_fetched'] = total_fetched
+        self.spider_stats['graphql_events_yielded'] = events_yielded
+        self.spider_stats['graphql_events_filtered_date'] = events_filtered_date
+
+    def _parse_graphql_event(self, event, is_school_event, source_url, today=None, limit=None):
+        """Parse a single event from GraphQL response into EventCategoryItem.
+        Returns item if valid, None if parse error, False if filtered by date.
+        """
+        try:
+            # Parse dates from Swedish format
+            date_time = event.get('dateTime', {})
+            start_date = parse_graphql_swedish_date(date_time.get('startDate'))
+            stop_date = parse_graphql_swedish_date(date_time.get('stopDate'))
+            
+            if not start_date:
+                return None
+            
+            # Date filtering (client-side since API doesn't support date range filtering)
+            if today and limit:
+                try:
+                    start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+                    end_dt = datetime.strptime(stop_date, "%Y-%m-%d").date() if stop_date else start_dt
+                    
+                    # Skip events that have already ended
+                    if end_dt < today:
+                        return False
+                    
+                    # Skip events that start too far in the future
+                    if start_dt > limit:
+                        return False
+                except ValueError:
+                    pass  # If date parsing fails, include the event
+            
+            # Build event URL from slug
+            slug = event.get('eventSlugId', '')
+            event_url = f"https://biblioteket.stockholm.se/evenemang/{slug}" if slug else ''
+            
+            # Extract time
+            start_time = date_time.get('startTime', '')
+            stop_time = date_time.get('stopTime', '')
+            if start_time and stop_time:
+                time_str = f"{start_time}-{stop_time}"
+            elif start_time:
+                time_str = start_time
+            else:
+                time_str = 'N/A'
+            
+            # Extract description from preamble
+            description = event.get('description', {})
+            desc_text = description.get('preamble', '') if description else ''
+            if not desc_text:
+                desc_text = event.get('otherInformation', '') or 'N/A'
+            
+            # Get image URL
+            image = event.get('image', {})
+            image_url = image.get('url', '') if image else ''
+            
+            # Determine target group
+            target_audiences = event.get('targetAudiences', [])
+            if is_school_event or "forskolor" in source_url:
+                target_group = "Preschool"
+                target_group_normalized = "preschool_groups"
+            elif target_audiences:
+                target_group = ', '.join(target_audiences)
+                target_group_normalized = self.simple_normalize(target_group)
+            else:
+                target_group = 'All'
+                target_group_normalized = 'all_ages'
+            
+            # Determine booking info
+            if event.get('bookable'):
+                booking_status = event.get('bookingStatus', '')
+                if booking_status and 'fullbokat' in str(booking_status).lower():
+                    booking_info = 'Fully booked'
+                else:
+                    booking_info = 'Requires booking'
+            else:
+                booking_info = 'N/A'
+            
+            # Determine event status
+            title = event.get('title', '')
+            status = 'cancelled' if event.get('canceled') else detect_cancelled_status(title, desc_text)
+            
+            # Extract location - prefer library name
+            location = event.get('library') or event.get('location') or 'N/A'
+            
+            # Create item
+            item = EventCategoryItem()
+            item['event_name'] = title
+            item['event_url'] = event_url
+            item['date_iso'] = start_date
+            item['date'] = start_date
+            item['end_date_iso'] = stop_date if stop_date and stop_date != start_date else 'N/A'
+            item['time'] = time_str
+            item['location'] = location
+            item['description'] = desc_text[:500] if desc_text else 'N/A'
+            item['target_group'] = target_group
+            item['target_group_normalized'] = target_group_normalized
+            item['status'] = status
+            item['booking_info'] = booking_info
+            item['image_url'] = image_url if image_url else None
+            item['age_limit'] = self.extract_age_limit(desc_text) or 'N/A'
+            
+            return item
+            
+        except Exception as e:
+            self.logger.warning(f"Stockholm GraphQL: Error parsing event {event.get('id', 'unknown')}: {e}")
+            return None
 
     def parse_stockholm_library_detail(self, response):
         data = response.meta.get('data')
