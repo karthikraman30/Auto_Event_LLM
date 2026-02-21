@@ -245,10 +245,43 @@ class DatabaseManager:
             return [event]
 
     def delete_old_events(self, days):
-        """Delete events older than specified days."""
+        """Delete events that have completely ended (considering multi-day events).
+        
+        Args:
+            days: Delete events that ended more than this many days ago.
+                  Use 0 to delete events that ended before today.
+        
+        Logic:
+            - Multi-day events: Delete if end_date_iso < cutoff AND end_date_iso != 'N/A'
+            - Single-day events: Delete if date_iso < cutoff AND (end_date_iso = 'N/A' OR end_date_iso IS NULL)
+        
+        Returns:
+            Number of events deleted
+        """
         cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-        response = self.supabase.table('events').delete().lt('date_iso', cutoff).execute()
-        return len(response.data) if response.data else 0
+        
+        # Delete multi-day events that have ended
+        # (end_date_iso < cutoff AND end_date_iso != 'N/A')
+        response_multi = self.supabase.table('events').delete().lt(
+            'end_date_iso', cutoff
+        ).neq('end_date_iso', 'N/A').execute()
+        
+        deleted_multi = len(response_multi.data) if response_multi.data else 0
+        
+        # Delete single-day events that have passed
+        # (date_iso < cutoff AND end_date_iso = 'N/A')
+        response_single = self.supabase.table('events').delete().lt(
+            'date_iso', cutoff
+        ).eq('end_date_iso', 'N/A').execute()
+        
+        deleted_single = len(response_single.data) if response_single.data else 0
+        
+        total_deleted = deleted_multi + deleted_single
+        
+        if total_deleted > 0:
+            print(f"[CLEANUP] Deleted {deleted_multi} multi-day events and {deleted_single} single-day events (total: {total_deleted})")
+        
+        return total_deleted
 
     def delete_event(self, event_name, date_iso, event_url):
         """Delete a specific event by its unique identifiers."""

@@ -5,8 +5,13 @@ This is the main entry point for the Cloud Run container that runs the scrapers.
 It exposes an HTTP endpoint that Cloud Scheduler can call to trigger scraping.
 
 Usage:
-    - Cloud Scheduler calls: POST / with {"mode": "baseline"} or {"mode": "incremental"}
+    - Cloud Scheduler calls: POST / with {"mode": "baseline"}, {"mode": "incremental"}, or {"mode": "cleanup"}
     - Manually test: curl -X POST http://localhost:8080 -d '{"mode": "incremental"}'
+    
+Modes:
+    - baseline: Monthly full scrape (1st of month)
+    - incremental: Quick check for changes (every 3 days)
+    - cleanup: Delete old events and clean logs (daily)
 """
 import os
 import sys
@@ -104,42 +109,93 @@ def run_incremental_scraper():
         }
 
 
+def run_cleanup():
+    """
+    Run the daily cleanup job.
+    
+    - Deletes events that have completely ended (checks end_date_iso for multi-day events)
+    - Clears old scraping logs (older than 90 days)
+    - Purges old resolved scrape failures (older than 30 days)
+    """
+    logger.info("Starting CLEANUP job...")
+    
+    try:
+        # Import DatabaseManager
+        from event_category.utils.db_manager import DatabaseManager
+        
+        db = DatabaseManager()
+        
+        # Delete old events (ended before today)
+        events_deleted = db.delete_old_events(days=0)
+        logger.info(f"Deleted {events_deleted} old events")
+        
+        # Clear old scraping logs (older than 90 days)
+        logs_cleared = db.clear_old_logs(days=90)
+        logger.info(f"Cleared {logs_cleared} old scraping logs")
+        
+        # Cleanup old resolved failures (older than 30 days)
+        failures_purged = db.cleanup_old_failures(days=30)
+        logger.info(f"Purged {failures_purged} old resolved failures")
+        
+        logger.info("Cleanup completed successfully")
+        return {
+            "success": True,
+            "mode": "cleanup",
+            "events_deleted": events_deleted,
+            "logs_cleared": logs_cleared,
+            "failures_purged": failures_purged,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Cleanup failed: {e}")
+        return {
+            "success": False,
+            "mode": "cleanup",
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+
 @app.route('/', methods=['GET', 'POST'])
 def handle_request():
     """
     Main endpoint for Cloud Scheduler triggers.
     
     GET: Health check / status
-    POST: Trigger scraper based on 'mode' parameter
+    POST: Trigger scraper or cleanup based on 'mode' parameter
     
     Example POST body:
-        {"mode": "baseline"}   - Run monthly baseline scraper
+        {"mode": "baseline"}    - Run monthly baseline scraper
         {"mode": "incremental"} - Run every-3-days incremental scraper
+        {"mode": "cleanup"}     - Run daily cleanup (delete old events, clear logs)
     """
     if request.method == 'GET':
         return jsonify({
             "status": "healthy",
             "service": "event-scraper",
-            "modes": ["baseline", "incremental"],
+            "modes": ["baseline", "incremental", "cleanup"],
             "timestamp": datetime.utcnow().isoformat()
         })
     
-    # POST request - trigger scraper
+    # POST request - trigger scraper or cleanup
     try:
         # Parse request body
         data = request.get_json(silent=True) or {}
         mode = data.get('mode', request.args.get('mode', 'incremental'))
         
-        logger.info(f"Received scrape request with mode: {mode}")
+        logger.info(f"Received request with mode: {mode}")
         
         if mode == 'baseline':
             result = run_baseline_scraper()
         elif mode == 'incremental':
             result = run_incremental_scraper()
+        elif mode == 'cleanup':
+            result = run_cleanup()
         else:
             return jsonify({
                 "success": False,
-                "error": f"Unknown mode: {mode}. Valid modes: baseline, incremental"
+                "error": f"Unknown mode: {mode}. Valid modes: baseline, incremental, cleanup"
             }), 400
         
         status_code = 200 if result.get('success') else 500
