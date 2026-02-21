@@ -120,8 +120,8 @@ def run_cleanup():
     logger.info("Starting CLEANUP job...")
     
     try:
-        # Import DatabaseManager
-        from event_category.utils.db_manager import DatabaseManager
+        # Import DatabaseManager (note the nested event_category path)
+        from event_category.event_category.utils.db_manager import DatabaseManager
         
         db = DatabaseManager()
         
